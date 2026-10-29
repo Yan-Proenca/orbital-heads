@@ -86,7 +86,7 @@ ENEMY_CLASSES_KINDS = ("drone", "ship", "machine", "mini")
 
 ROUNDS_TO_WIN = 10      # default/fallback; o valor real por partida é GAME_MODES[modo]["rounds_to_win"]
 ROUND_TABLE = {
-    1: (8, 10, 0), 2: (12, 12, 3), 3: (12, 14, 4), 4: (10, 16, 4), 5: (0, 12, 4),
+    1: (8, 10, 0), 2: (12, 12, 3), 3: (12, 14, 4), 4: (10, 16, 4), 5: (0, 10, 4),
     6: (0, 14, 4), 7: (0, 14, 4), 8: (0, 16, 4), 9: (0, 10, 6), 10: (0, 10, 5),
 }
 ENDLESS_BASE_ROUND = 3
@@ -102,8 +102,8 @@ DESCENT_SPEED = 150.0
 ENTRY_DROP = 210.0
 
 BOMB_FIRST_DELAY = 1.9
-BOMB_INTERVAL_BASE = 1.9
-BOMB_INTERVAL_DECAY = 0.15
+BOMB_INTERVAL_BASE = 2.0
+BOMB_INTERVAL_DECAY = 0.16
 BOMB_INTERVAL_MIN = 0.7
 BOMB_SPEED = 260.0
 BOMB_SPEED_GROWTH = 12.0
@@ -262,15 +262,15 @@ ROUND_SPECIALS = {
 MINIBOSS = dict(base_y=150, amplitude=420, speed=0.55, first_attack=1.4,
                  rocket_interval=3.6, rocket_count=2, rocket_speed=140.0, rocket_omega=4.2, rocket_radius=(10.0, 60.0),
                  rocket_grow=2.5, rain_interval=2.7, rain_speed=300.0, rain_spread=0.40, rain_stagger=0.15)
-MOTHERSHIP = dict(base_y=150, amplitude=440, speed=0.45, first_attack=1.5, shot_interval=2.0, shot_speed=290.0,
-                   burst_interval=5.5, burst_count=9, burst_speed=230.0, split=(2, 4))
+MOTHERSHIP = dict(base_y=150, amplitude=440, speed=0.45, first_attack=1.5, shot_interval=2.0, shot_speed=300.0,
+                   burst_interval=5.5, burst_count=9, burst_speed=230.0, split=(4, 7))
 FINALBOSS = dict(base_y=172, amplitude=430, speed=0.50, first_attack=1.6, interval=1.9, bullet_speed=300.0,
                   regen_time=3.4, regen_fraction=0.65,
                   frenzy_speed_mult=1.6, frenzy_interval_mult=0.55, min_interval=0.6,
                   orb_fuse=1.9, orb_radius=115.0, orb_speed=210.0, orb_warn=0.9)
 CAR = dict(speed=190.0, impacts=3, stomp_lock=0.3, spark_interval=0.07, turbo_mult=2.0,
            turbo_every=(3.0, 4.5), turbo_time=0.9)
-JET = dict(count=2, lanes=(118, 470), bomb_interval=1.0, away_time=(1.2, 2.6), bomb_vx_factor=0.3, first_delay=(0.5, 2.0))
+JET = dict(count=2, lanes=(250, 470), bomb_interval=1.0, away_time=(1.2, 2.6), bomb_vx_factor=0.3, first_delay=(0.5, 2.0))
 JET_BOMB = dict(hp=3, speed=190.0, ground_radius=110.0, air_radius=50.0)
 MINI_FIRE_INTERVAL = (2.2, 3.4)
 MINI_BULLET_SPEED = 260.0

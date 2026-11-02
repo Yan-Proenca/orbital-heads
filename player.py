@@ -8,7 +8,7 @@ import math
 import pygame
 
 import settings as S
-from utils import clamp, approach, mult_clamp, get_font
+from utils import clamp, approach, mult_clamp, get_font, draw_heart
 
 
 class Player:
@@ -29,6 +29,8 @@ class Player:
         self.kills = 0
         self.kills_by_type = {k: 0 for k in S.ENEMY_TYPES}
         self.eliminated = False
+        self.eliminated_at = 0.0          # game.match_time em que ficou sem vidas (prioridade da doação: o mais recente)
+        self.donate_cd = 0.0              # intervalo entre tentativas de doar vida (evita spam de avisos)
         self.dead = False
         self.respawn_timer = 0.0
         self.dash_cd = 0.0
@@ -94,6 +96,7 @@ class Player:
 
     # ---------------------------------------------------------- lógica
     def update(self, dt):
+        self.donate_cd = max(0.0, self.donate_cd - dt)
         if self.eliminated:
             return
         if self.dead:
@@ -228,6 +231,7 @@ class Player:
             self.lives = 0
             self.dead = False
             self.eliminated = True
+            self.eliminated_at = g.match_time
             g.audio.on_player_death()
             g.on_player_eliminated(self)
         else:
@@ -241,6 +245,20 @@ class Player:
         self.invuln = S.INVULN_TIME
         self.game.fx.dust(self.x, S.GROUND_Y, 6)
 
+    def revive(self, x, lives, invuln):
+        """Volta de ELIMINADO (doação de vida de um aliado): `lives` vida(s), posição segura `x` e uma janela
+        de invulnerabilidade mais longa que o respawn comum. Placar, abates e estatísticas são preservados."""
+        self._init_motion()
+        half = self.W / 2 + S.ARENA_MARGIN
+        self.x = clamp(x, half, S.WIDTH - half)
+        self.eliminated = False
+        self.dead = False
+        self.respawn_timer = 0.0
+        self.lives = lives
+        self.invuln = invuln
+        self.dash_cd = 0.0
+        self.clear_boosts()
+
     # ---------------------------------------------------------- desenho
     # ---------------------------------------------------------- desenho
     def draw(self, surf):
@@ -249,6 +267,16 @@ class Player:
             font = get_font(S.FONT_UI_NAME, 22, bold=True)
             img = font.render("GAME OVER", True, S.hx("#ff4d6d"))
             surf.blit(img, img.get_rect(center=(int(x), S.GROUND_Y - 34)))
+            hint = self.game.revive_hint(self)
+            if hint is not None:            # algum aliado pode doar vida: coração pulsando + quem/qual tecla
+                beat = 0.5 + 0.5 * math.sin(self.game.match_time * 6.0)
+                heart_col = S.hx(S.LIFE_BOOST["color"])
+                draw_heart(surf, x, S.GROUND_Y - 92, 20 + 5 * beat, heart_col, outline=(255, 255, 255))
+                small = get_font(S.FONT_UI_NAME, 13, bold=True)
+                msg = small.render("PRECISA DE AJUDA", True, S.hx(S.LIFE_BOOST["light"]))
+                surf.blit(msg, msg.get_rect(center=(int(x), S.GROUND_Y - 68)))
+                tip = small.render("DOAR VIDA  " + hint, True, (255, 255, 255))
+                surf.blit(tip, tip.get_rect(center=(int(x), S.GROUND_Y - 12)))
             return
         if self.dead:
             return

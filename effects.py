@@ -8,7 +8,7 @@ import random
 import pygame
 
 import settings as S
-from utils import clamp
+from utils import clamp, draw_heart
 
 LOD_START = 24   # "carga" (inimigos + 0.5*projéteis) a partir da qual o teto de partículas começa a cair
 LOD_FULL = 70     # carga em que o teto chega ao mínimo
@@ -166,6 +166,29 @@ class FloatText(_Particle):
         surf.blit(img, img.get_rect(center=(int(self.x), int(self.y))))
 
 
+class Heart(_Particle):
+    """Coração de energia que sobe e some (boost de vida / doação / renascimento)."""
+
+    def __init__(self, x, y, color, life=0.9, size=16, vx=0.0, vy=-70.0):
+        self.x, self.y = x, y
+        self.vx, self.vy = vx, vy
+        self.color = S.hx(color)
+        self.size = size
+        self.life = self.max_life = life
+
+    def update(self, dt):
+        self.life -= dt
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.vy *= 0.985
+        return self.life > 0
+
+    def draw(self, surf):
+        k = clamp(self.life / self.max_life, 0.0, 1.0)
+        draw_heart(surf, self.x, self.y, self.size * (0.7 + 0.3 * k), self.color, alpha=int(255 * k),
+                   outline=(255, 255, 255))
+
+
 # ----------------------------------------------------------------- gerenciador
 class Effects:
     """Gerencia partículas com suporte adaptativo de desempenho e estilo visual coeso."""
@@ -285,3 +308,25 @@ class Effects:
     def ring(self, x, y, r0, r1, color, life=0.5, width=3):
         if self.room(1):
             self.items.append(Ring(x, y, r0, r1, color, life, width=width))
+
+    def hearts(self, x, y, color, n=5, spread=34.0, size=16):
+        """Corações subindo ao redor de (x, y): coleta de vida / doação."""
+        for i in range(n):
+            if self.room(1, True):
+                self.items.append(Heart(x + random.uniform(-spread, spread), y + random.uniform(-10, 10), color,
+                                         life=random.uniform(0.7, 1.1), size=size + random.randint(-3, 3),
+                                         vx=random.uniform(-25, 25), vy=-random.uniform(60, 120)))
+
+    def revive(self, x, y, color):
+        """Renascimento: coluna de luz (anéis em sequência), faíscas e corações."""
+        if self.room(3, True):
+            self.items.append(Ring(x, y - 30, 6, 80, "#ffffff", 0.45, width=4))
+            self.items.append(Ring(x, y - 30, 4, 56, color, 0.60, width=3))
+            self.items.append(Ring(x, y - 6, 10, 70, color, 0.35, width=2))
+        for _ in range(10 if self.level == 0 else 5):
+            if self.room(1, True):
+                a = random.uniform(-2.9, -0.25)
+                sp = random.uniform(120, 300)
+                self.items.append(Debris(x, y - 20, math.cos(a) * sp, math.sin(a) * sp, random.uniform(3, 6),
+                                          random.choice((color, "#ffffff", "#ffc2d4")), random.uniform(0.35, 0.7), 420))
+        self.hearts(x, y - 50, "#ff5c8a", n=4 if self.level == 0 else 2)

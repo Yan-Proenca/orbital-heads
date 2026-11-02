@@ -157,6 +157,12 @@ class AudioManager:
         else:
             self.play_sfx("pickup_boost_good" if good else "pickup_boost_bad")
 
+    def on_life_pickup(self):
+        self.play_sfx("pickup_boost_good")
+
+    def on_revive(self):
+        self.play_sfx("pickup_weapon")      # reaproveita um som existente; troque por um SFX próprio quando houver
+
     def on_dash(self):
         self.play_sfx("dash", cooldown=0.05)
 

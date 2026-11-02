@@ -4,6 +4,11 @@ encontros especiais (chefes, carro, jatos) e ataques de bomba dos inimigos
 padrão. Porte fiel do main.py original; a única mudança é que os inimigos
 não precisam mais de build(gfx) — em Pygame eles só se desenham a cada
 quadro via draw(surf), então a criação é só "adicionar à lista".
+
+Estados de um round: idle | intro | active (combate) | hazard (fases extras de
+perigos ambientais, ver hazards.py) | clear. O estado "hazard" só existe se o
+round tiver fases configuradas em settings.HAZARD_ROUNDS; senão active -> clear
+direto, exatamente como antes.
 """
 import math
 import random
@@ -11,6 +16,7 @@ import random
 import settings as S
 from enemy import ENEMY_CLASSES, Miniboss, Mothership, FinalBoss, CyberCar, Jet, MiniShip
 from squad import Squad
+from hazards import HazardManager
 from utils import clamp
 
 
@@ -28,9 +34,11 @@ def wave_counts(round_no):
 class WaveManager:
     def __init__(self, game):
         self.game = game
+        self.hazards = HazardManager(self)
         self.reset()
 
     def reset(self):
+        self.hazards.reset()
         self.round_no = 0
         self.state = "idle"            # idle | intro | active | clear
         self.timer = 0.0
@@ -62,6 +70,7 @@ class WaveManager:
 
     # ------------------------------------------------------------ rounds
     def begin_round(self, n):
+        self.hazards.reset()
         self.round_no = n
         self.state = "intro"
         self.squads, self.enemies = [], []
@@ -71,6 +80,7 @@ class WaveManager:
         self.timer = sp["intro"] if sp else S.ROUND_INTRO_TIME
         self.planned = sum(wave_counts(n).values()) + self.special_count(sp)
         self.game.drops_this_round = 0
+        self.game.life_drops_this_round = 0
         if sp:
             self.game.show_banner("ROUND %d" % n, sp["title"], "#ff4d6d", self.timer, alert=True)
             self.game.flash("#ff2a4d", 0.25)
@@ -113,6 +123,7 @@ class WaveManager:
         if sp:
             self.spawn_special(sp)
         self.planned = len(self.enemies)
+        self.hazards.on_combat_start(n)          # Black Saws entram junto com o combate
 
     # ------------------------------------------------------------ encontros especiais
     def _add_solo(self, e):
@@ -201,10 +212,17 @@ class WaveManager:
                 if self.bomb_timer <= 0:
                     self.drop_bomb()
                     self.bomb_timer = self.bomb_interval()
+            self.hazards.update(dt)
             if not self.enemies:
-                self.state = "clear"
-                self.timer = S.ROUND_CLEAR_TIME
-                g.on_round_cleared(self.round_no)
+                # combate principal concluído: fases de hazard (se houver) antes de fechar o round
+                if self.hazards.begin_sequence():
+                    self.state = "hazard"
+                else:
+                    self._finish_round()
+        elif self.state == "hazard":
+            self.hazards.update(dt)
+            if self.hazards.sequence_done:
+                self._finish_round()
         elif self.state == "clear":
             self.timer -= dt
             if self.timer <= 0:
@@ -213,6 +231,14 @@ class WaveManager:
                 else:
                     self.begin_round(self.round_no + 1)
 
+    def _finish_round(self):
+        """Round concluído (combate + fases de hazard): tira as serras de cena e abre a tela de transição."""
+        self.state = "clear"
+        self.timer = S.ROUND_CLEAR_TIME
+        self.hazards.clear_round()
+        self.game.on_round_cleared(self.round_no)
+
     def draw(self, surf):
         for e in self.enemies:
             e.draw(surf)
+        self.hazards.draw(surf)

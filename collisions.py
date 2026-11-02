@@ -2,6 +2,10 @@
 collisions.py — colisões geométricas (AABB; círculo x retângulo nas
 explosões em área). Porte fiel de CollisionManager em main.py, usando a
 mesma grade espacial (SpatialGrid) para tiro x alvo quando há muitos pares.
+
+Hazards (hazards.py): tiro x hazard destrutível entra na MESMA passada de
+shots_vs_enemies (mesma grade espacial); jogador x hazard e hazard x arena
+(foguete no chão, quique de esferas/cápsulas nas paredes) têm métodos próprios.
 """
 import settings as S
 from projectile import Projectile
@@ -16,9 +20,11 @@ class CollisionManager:
         self.pairs_checked = 0
 
     def update(self):
+        self.hazards_vs_arena()
         self.shots_vs_enemies()
         self.bombs_vs_players()
         self.enemies_vs_players()
+        self.hazards_vs_players()
         self.pickups_vs_players()
         self.breach()
 
@@ -30,6 +36,7 @@ class CollisionManager:
             return
         targets = [e for e in g.wave.enemies if e.alive and e.shootable]
         targets += [b for b in g.projectiles if b.alive and b.owner is None and b.hp is not None and not b.exploded]
+        targets += g.wave.hazards.shootables()
         if not targets:
             return
         use_grid = S.USE_SPATIAL_GRID and len(targets) * len(shots) > S.GRID_MIN_PAIRS
@@ -56,6 +63,9 @@ class CollisionManager:
             if isinstance(best, Projectile):
                 if best.hit(b.damage):
                     g.on_projectile_destroyed(best, b.owner)
+            elif getattr(best, "is_hazard", False):
+                if best.hit(b.damage):
+                    g.on_hazard_destroyed(best, b.owner)
             elif best.hit(b.damage):
                 g.on_enemy_destroyed(best, b.owner)
         self.pairs_checked = checked
@@ -95,6 +105,29 @@ class CollisionManager:
                     p.take_hit()
                     break
 
+    # ------------------------------------------------------------ hazards
+    def hazards_vs_arena(self):
+        """Hazard x limites da arena: foguete que chega ao chão arma o pavio, esferas/cápsulas quicam nas
+        paredes/chão/teto, serras seguem o trilho. Roda ANTES dos testes de tiro/contato do quadro."""
+        for h in list(self.game.wave.hazards.all_alive()):
+            h.resolve_arena()
+
+    def hazards_vs_players(self):
+        """Contato jogador x hazard. Cada jogador sofre no máximo UM golpe por quadro (take_hit o deixa
+        morto/invulnerável de imediato, então can_be_hit() já devolve False para qualquer outro hazard)."""
+        g = self.game
+        hz = g.wave.hazards
+        if not hz.any_active():
+            return
+        for p in g.players:
+            if not p.can_be_hit():
+                continue
+            hb = p.hitbox()
+            for h in hz.all_alive():
+                if h.hurts and h.touches(hb):
+                    h.on_player_contact(g, p)
+                    break
+
     # ------------------------------------------------------------ itens
     def pickups_vs_players(self):
         g = self.game
@@ -102,7 +135,7 @@ class CollisionManager:
             if not pk.alive or pk.collected:
                 continue
             for p in g.players:
-                if p.active and overlap(p.hitbox(), pk.hb):
+                if p.active and overlap(p.hitbox(), pk.hb) and g.can_collect(p, pk):
                     g.collect(p, pk)
                     break
 

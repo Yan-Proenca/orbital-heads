@@ -247,6 +247,8 @@ class InputManager:
             new_held.add(prefix + "dash")
         if self.gamepad.button_down(slot, btn["fire"]):
             new_held.add(prefix + "fire")
+        if self.gamepad.button_down(slot, btn["donate_life"]):
+            new_held.add(prefix + "donate_life")
 
     def take_pressed(self):
         p = self.pressed

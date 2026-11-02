@@ -77,6 +77,12 @@ ENEMY_TYPES = {
     "jet": dict(label="Jato", w=88, h=34, hit_w=78, hit_h=26, hp=6, hp_growth=0.35, points=400, speed=250.0, size=70,
                 fx=("#e0f6ff", "#37c8ff", ("#37c8ff", "#ffffff", "#8d9bc2"))),
     "jetbomb": dict(label="Bomba", points=50),
+    # Hazards destrutíveis: só rótulo (a tela de MVP lê o nome daqui); atributos reais em ROCKET_TYPES etc.
+    "rocket": dict(label="Foguete", points=0),
+    "pod": dict(label="Cápsula", points=0),
+    "podball": dict(label="Mini-esfera", points=0),
+    "sphere": dict(label="Esfera", points=0),
+    "blacksaw": dict(label="Serra", points=0),
 }
 STANDARD_KINDS = ("drone", "ship", "machine")
 ENEMY_ORDER = ("machine", "ship", "drone")
@@ -142,20 +148,20 @@ DEFAULT_PLAYER_COUNT = 2
 PLAYER_DEFS = [
     dict(name="JOGADOR 1", short="P1", color="#37c8ff", dark="#0b6a99", light="#c7f4ff",
          visor="#ffffff", bullet="#9ff0ff", bullet_core="#ffffff", spawn_x_frac=0.20, facing=1,
-         key_names=dict(left="a", right="d", jump="w", dash="s", fire="space"),
-         labels=(("A / D", "mover"), ("W", "pular"), ("S", "dash"), ("ESPAÇO", "atirar para cima"))),
+         key_names=dict(left="a", right="d", jump="w", dash="s", fire="space", donate_life="e"),
+         labels=(("A / D", "mover"), ("W", "pular"), ("S", "dash"), ("ESPAÇO", "atirar para cima"), ("E", "doar vida"))),
     dict(name="JOGADOR 2", short="P2", color="#ff9a3c", dark="#a4500b", light="#ffe2c4",
          visor="#fff3c4", bullet="#ffd27a", bullet_core="#fff6d8", spawn_x_frac=0.40, facing=-1,
-         key_names=dict(left="left", right="right", jump="up", dash="down", fire="return"),
-         labels=(("← / →", "mover"), ("↑", "pular"), ("↓", "dash"), ("ENTER", "atirar para cima"))),
+         key_names=dict(left="left", right="right", jump="up", dash="down", fire="return", donate_life="right shift"),
+         labels=(("← / →", "mover"), ("↑", "pular"), ("↓", "dash"), ("ENTER", "atirar para cima"), ("SHIFT DIR.", "doar vida"))),
     dict(name="JOGADOR 3", short="P3", color="#46f08a", dark="#0b7a45", light="#c8ffe0",
          visor="#e8fff0", bullet="#8dffc0", bullet_core="#ffffff", spawn_x_frac=0.60, facing=1,
-         key_names=dict(left="j", right="l", jump="i", dash="k", fire="o"),
-         labels=(("J / L", "mover"), ("I", "pular"), ("K", "dash"), ("O", "atirar para cima"))),
+         key_names=dict(left="j", right="l", jump="i", dash="k", fire="o", donate_life="u"),
+         labels=(("J / L", "mover"), ("I", "pular"), ("K", "dash"), ("O", "atirar para cima"), ("U", "doar vida"))),
     dict(name="JOGADOR 4", short="P4", color="#b07cff", dark="#5a2e99", light="#e8d8ff",
          visor="#f3e8ff", bullet="#d8b8ff", bullet_core="#ffffff", spawn_x_frac=0.80, facing=-1,
-         key_names=dict(left="kp4", right="kp6", jump="kp8", dash="kp5", fire="kp0"),
-         labels=(("4 / 6 (num.)", "mover"), ("8 (num.)", "pular"), ("5 (num.)", "dash"), ("0 (num.)", "atirar"))),
+         key_names=dict(left="kp4", right="kp6", jump="kp8", dash="kp5", fire="kp0", donate_life="kp_enter"),
+         labels=(("4 / 6 (num.)", "mover"), ("8 (num.)", "pular"), ("5 (num.)", "dash"), ("0 (num.)", "atirar"), ("ENTER (num.)", "doar vida"))),
 ]
 
 ROUND_NOTES = {1: "Um enxame de drones se aproxima",
@@ -314,7 +320,7 @@ MUSIC_FILES = {
 # resolve o índice físico certo por família de controle (Xbox, PlayStation,
 # Switch, genérico), então aqui não lidamos mais com índices numéricos.
 JOYSTICK_DEADZONE = 0.35
-GAMEPAD_BUTTONS = dict(jump="a", dash="b", fire="x", pause="start", confirm="a", back="b")
+GAMEPAD_BUTTONS = dict(jump="a", dash="b", fire="x", donate_life="y", pause="start", confirm="a", back="b")
 GAMEPAD_AXIS_X = 0          # analógico esquerdo, eixo horizontal
 GAMEPAD_AXIS_Y = 1          # analógico esquerdo, eixo vertical (navegação de menu)
 MENU_AXIS_REPEAT_DELAY = 0.35   # 1º passo do analógico/d-pad no menu
@@ -323,3 +329,135 @@ MENU_AXIS_REPEAT_RATE = 0.16    # passos seguintes enquanto mantém segurado
 # Cor da luz (barra de luz do PS4/PS5) atribuída a cada vaga de jogador,
 # para quem estiver usando controle com LED — puramente estético.
 GAMEPAD_LED_COLORS = ["#37c8ff", "#ff9a3c", "#46f08a", "#b07cff"]
+
+
+# =====================================================================================
+# RODADA 4 — BOOST DE VIDA, DOAÇÃO DE VIDAS E HAZARDS (tudo ajustável aqui, nada fixo nas classes)
+# =====================================================================================
+
+# ----------------------------------------------------------------- boost de vida (pickup "life")
+# chance_by_round: pares (a_partir_do_round, chance_por_abate). Vale a última faixa cujo round <= atual.
+# Rounds 1-3 = 0%. max_per_round / max_active são travas de balanceamento (use 999 para desligar).
+LIFE_BOOST = dict(
+    chance_by_round=((1, 0.00), (4, 0.03), (6, 0.05), (8, 0.07), (10, 0.09)),
+    lifetime=8.0,              # segundos disponível depois de pousar (como WEAPON_PICKUP_LIFETIME)
+    amount=1,                  # vidas concedidas ao coletar
+    max_lives=9,               # teto de vidas por jogador (None = sem teto)
+    max_per_round=3,           # no máximo N itens de vida por round
+    max_active=2,              # no máximo N itens de vida simultâneos na tela
+    eligible=("drone", "ship", "machine", "mini", "jet", "car", "miniboss", "mothership"),
+    color="#ff5c8a", light="#ffc2d4",
+)
+
+# ----------------------------------------------------------------- doação de vidas entre jogadores
+# A ação por jogador chama-se "donate_life" (ver PLAYER_DEFS[i]["key_names"] e GAMEPAD_BUTTONS).
+# Só um jogador ELIMINADO (0 vidas) pode ser revivido: a "morte" de 1 vida já renasce sozinha em RESPAWN_DELAY.
+LIFE_DONATION = dict(
+    min_donor_lives=2,         # o doador nunca doa a própria última vida
+    cost=1,                    # vidas descontadas do doador
+    revive_lives=1,            # vidas com que o aliado volta
+    invuln=3.0,                # invulnerabilidade após ser revivido (s)
+    cooldown=0.4,              # intervalo mínimo entre tentativas do mesmo doador (evita spam de avisos)
+)
+
+# ----------------------------------------------------------------- hazards: fases depois do combate
+# Cada fase tem texto de aviso, cor e tempo de "aviso" (o hazard só nasce depois dele).
+HAZARD_PHASES = dict(
+    rockets=dict(banner="INCOMING ROCKETS!", sub="Desvie ou destrua os foguetes", color="#ff7a1a",
+                 warn=1.8, hud="CHUVA DE FOGUETES"),
+    ball_pod=dict(banner="BALL POD DEPLOYED!", sub="Destrua as cápsulas e o que elas liberarem", color="#37c8ff",
+                  warn=1.8, hud="BALL POD"),
+    spheres=dict(banner="BOUNCING SPHERES!", sub="Destrua todas as esferas", color="#ffe14d",
+                 warn=1.8, hud="ESFERAS"),
+)
+HAZARD_CLEARED = dict(title="HAZARD CLEARED!", sub="Setor limpo", color="#46f08a", time=1.4)
+HAZARD_PHASE_TIMEOUT = 80.0     # trava de segurança: uma fase nunca dura mais que isso (limpa o que sobrou)
+HAZARD_RESOLVE_TIMEOUT = 9.0    # fase de foguetes: máximo esperando os últimos foguetes se resolverem
+HAZARD_RESOLVE_PAUSE = 0.5      # respiro (s) depois do último foguete resolvido, para as explosões acabarem
+HAZARD_PLAYER_SCALE = 0.20      # +20% de quantidade/ritmo por jogador extra (1 jogador = 1.0x, 4 = 1.6x)
+HAZARD_ENDLESS_CYCLE = (3, 4, 7, 8, 9)   # modo infinito (round > 10): reaproveita estes rounds em ciclo...
+HAZARD_ENDLESS_GROWTH = 0.05             # ...com +5% de intensidade por round acima do 10...
+HAZARD_ENDLESS_MAX_SCALE = 2.0           # ...até este teto.
+
+# ----------------------------------------------------------------- hazards: quais rounds têm o quê
+# saws   : nº de Black Saws ativas JUNTO do combate (e durante todas as fases) — 0 = nenhuma.
+# order  : ordem das fases depois do combate; só roda o que estiver listado E configurado. () = nenhuma.
+# rockets   -> duration (s), interval (min, max) entre foguetes, max_alive simultâneos, mix (tipo, peso), speed_mult
+# ball_pod  -> pods (um item por cápsula: "release" ou "bounce"), stagger (s entre cápsulas), balls (min, max) opcional
+# spheres   -> mix (tipo, QUANTIDADE), stagger (s entre esferas)
+# Round 10 (chefe final): sem hazards por padrão — o chefe já tem 3 fases e ataques próprios. Para testar,
+# basta por ex. trocar por  10: dict(saws=1, order=("rockets",), rockets=dict(...)).
+HAZARD_ROUNDS = {
+    1: dict(saws=0, order=("rockets",),
+            rockets=dict(duration=9.0, interval=(1.00, 1.50), max_alive=3,
+                         mix=(("small", 6), ("medium", 3)))),
+    2: dict(saws=0, order=("rockets",),
+            rockets=dict(duration=11.0, interval=(0.85, 1.25), max_alive=4,
+                         mix=(("small", 5), ("medium", 4), ("large", 1)))),
+    3: dict(saws=1, order=("rockets",),
+            rockets=dict(duration=12.0, interval=(0.75, 1.15), max_alive=4,
+                         mix=(("small", 4), ("medium", 4), ("large", 2)))),
+    4: dict(saws=1, order=("rockets",),
+            rockets=dict(duration=14.0, interval=(0.65, 1.00), max_alive=5,
+                         mix=(("small", 4), ("medium", 4), ("large", 2)))),
+    5: dict(saws=0, order=("ball_pod",),
+            ball_pod=dict(pods=("release", "bounce"), stagger=1.6)),
+    6: dict(saws=0, order=("ball_pod", "spheres"),
+            ball_pod=dict(pods=("release", "release", "bounce"), stagger=1.4),
+            spheres=dict(mix=(("light", 3), ("heavy", 1)), stagger=0.6)),
+    7: dict(saws=1, order=("rockets",),
+            rockets=dict(duration=15.0, interval=(0.55, 0.90), max_alive=6,
+                         mix=(("small", 4), ("medium", 4), ("large", 3)))),
+    8: dict(saws=2, order=("spheres",),
+            spheres=dict(mix=(("light", 4), ("heavy", 2)), stagger=0.5)),
+    9: dict(saws=2, order=("rockets", "ball_pod", "spheres"),
+            rockets=dict(duration=13.0, interval=(0.60, 0.95), max_alive=5,
+                         mix=(("small", 4), ("medium", 4), ("large", 2))),
+            ball_pod=dict(pods=("release", "bounce", "release"), stagger=1.3),
+            spheres=dict(mix=(("light", 3), ("heavy", 2)), stagger=0.5)),
+    10: dict(saws=0, order=()),
+}
+
+# ----------------------------------------------------------------- hazard: ROCKETS (chuva de foguetes)
+# speed (min, max) px/s | air_radius: explosão ao ser destruído no ar | ground_radius: explosão no chão
+# fuse: tempo (s) armado no chão antes de detonar (telegrafado por um anel no chão)
+ROCKET_TYPES = {
+    "small": dict(w=12, h=30, hp=1, speed=(400.0, 470.0), air_radius=34, ground_radius=64, fuse=0.30,
+                  points=20, color="#ffd23f", fx=("#fff6c0", "#ffb02e", ("#ffd23f", "#ff8a1f", "#ffffff")), size=34),
+    "medium": dict(w=18, h=44, hp=2, speed=(290.0, 340.0), air_radius=48, ground_radius=92, fuse=0.45,
+                   points=45, color="#ff7a1a", fx=("#ffe0a0", "#ff7a1a", ("#ff7a1a", "#ffd23f", "#ffffff")), size=52),
+    "large": dict(w=28, h=66, hp=5, speed=(200.0, 240.0), air_radius=66, ground_radius=135, fuse=0.65,
+                  points=100, color="#ff4d6d", fx=("#ffffff", "#ff2a4d", ("#ff4d6d", "#ffd23f", "#ff7ad9", "#ffffff")),
+                  size=84),
+}
+ROCKET_RAIN = dict(drift=35.0,          # deriva horizontal máxima (px/s) — "pequenas variações de trajetória"
+                   aim_chance=0.35,     # chance de um foguete nascer perto de um jogador vivo
+                   aim_spread=140.0,    # dispersão (px) dessa mira
+                   margin=36,           # distância mínima das paredes ao nascer
+                   min_gap=90)          # afastamento mínimo (px) entre foguetes consecutivos
+
+# ----------------------------------------------------------------- hazard: BALL POD (cápsulas)
+# "release": desce, abre e libera mini-esferas | "bounce": fica fechada ricocheteando pela arena
+BALL_POD_TYPES = {
+    "release": dict(r=30, hp=5, fall_speed=135.0, open_y=(250, 380), activate=1.1, open_time=0.7,
+                    balls=(3, 4), points=120),
+    "bounce": dict(r=33, hp=10, speed=270.0, diag=0.8, mode_time=(2.4, 4.2), lane_y=(300, 540), points=200),
+}
+# mini-esferas liberadas (ameaça obrigatória da fase). life = trava de segurança (estoura sozinha depois).
+POD_BALL = dict(r=11, hp=1, speed_x=(150.0, 240.0), burst_v=(560.0, 760.0), gravity=1500.0, bounce_v=760.0,
+                points=40, life=30.0)
+
+# ----------------------------------------------------------------- hazard: BOUNCING SPHERES
+SPHERE_GRAVITY = 1500.0
+SPHERE_TYPES = {
+    "light": dict(r=17, hp=2, speed_x=(190.0, 250.0), bounce_v=980.0, points=60, color="#7cecff"),
+    "heavy": dict(r=29, hp=7, speed_x=(110.0, 150.0), bounce_v=760.0, points=150, color="#ff9a3c"),
+}
+SPHERE_SPAWN = dict(y=(HUD_H + 50, 230), margin=70)
+
+# ----------------------------------------------------------------- hazard: BLACK SAWS (perímetro da arena)
+BLACK_SAW = dict(radius=27, speed=330.0, spawn_warn=1.4, margin=6, corner_radius=70.0, teeth=14,
+                 hit_scale=0.88,            # fração do raio visual usada como hitbox circular
+                 alternate_direction=True,  # serras vizinhas giram em sentidos opostos
+                 destructible=False, hp=14,  # True: tiros dos jogadores podem destruí-las
+                 spark_interval=(0.18, 0.45))

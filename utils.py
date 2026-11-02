@@ -98,3 +98,34 @@ def get_font(name, size, bold=False):
         font = pygame.font.SysFont(name, size, bold=bold)
         _font_cache[key] = font
     return font
+
+
+_heart_cache = {}
+
+
+def _heart_shape(surf, cx, cy, size, color):
+    """Coração com 2 círculos + 1 triângulo; `size` = largura total, (cx, cy) = centro do desenho."""
+    r = size * 0.26
+    top = cy - size * 0.5 + r
+    pygame.draw.circle(surf, color, (cx - r * 0.98, top), r)
+    pygame.draw.circle(surf, color, (cx + r * 0.98, top), r)
+    pygame.draw.polygon(surf, color, [(cx - r * 1.92, top + r * 0.30), (cx + r * 1.92, top + r * 0.30),
+                                       (cx, cy + size * 0.48)])
+
+
+def draw_heart(surf, cx, cy, size, color, alpha=255, outline=None):
+    """Coração centrado em (cx, cy). A superfície é desenhada UMA vez por (tamanho, cor, contorno)
+    e depois só colada (set_alpha é O(1)), igual a draw_glow_circle — seguro para usar todo quadro."""
+    size = max(6, int(size))
+    key = (size, tuple(color[:3]), tuple(outline[:3]) if outline else None)
+    heart = _heart_cache.get(key)
+    if heart is None:
+        w = size + 8
+        heart = pygame.Surface((w, w), pygame.SRCALPHA)
+        c = w / 2
+        if outline:
+            _heart_shape(heart, c, c, size + 4, outline)
+        _heart_shape(heart, c, c, size, key[1])
+        _heart_cache[key] = heart
+    heart.set_alpha(int(clamp(alpha, 0, 255)))
+    surf.blit(heart, (int(cx - heart.get_width() / 2), int(cy - heart.get_height() / 2)))

@@ -17,6 +17,8 @@ orbital_heads/
 ├── audio.py            # AudioManager: pygame.mixer para BGM + SFX, com fallback gracioso
 ├── input_handler.py    # InputManager: unifica teclado + joystick (USB/Bluetooth) por jogador
 ├── utils.py             # clamp/approach/overlap/mult_clamp — portados sem alteração
+├── hazards.py          # (rodada 4) Black Saws, Rockets, Ball Pod, Bouncing Spheres + máquina de fases
+├── selftest_hazards.py # (rodada 4) testes automáticos headless: python selftest_hazards.py
 ├── requirements.txt
 └── assets/
     ├── sfx/             # efeitos sonoros (.ogg/.wav) — ver assets/README.md
@@ -422,6 +424,90 @@ jogador que o estivesse usando); e a correção da heurística de família
 PS4-legado-vs-PS5/DualSense em `gamepad.py`, que inicialmente classificava
 incorretamente o DualSense no mapa de botões do DualShock 4 por ambos
 conterem "Wireless Controller" no nome reportado pelo sistema.
+
+## Rodada 4: boost de vida, doação de vidas e hazards ambientais
+
+Tudo é configurável em `settings.py` (blocos `LIFE_BOOST`, `LIFE_DONATION`, `HAZARD_*`,
+`ROCKET_*`, `BALL_POD_*`, `POD_BALL`, `SPHERE_*`, `BLACK_SAW`); nenhuma classe tem número fixo.
+
+### 1) Boost de vida (`pickup.py`, kind `"life"`)
+
+- Chance **por abate** de qualquer inimigo elegível (`LIFE_BOOST["eligible"]`), a partir do round 4:
+  `chance_by_round=((1,0.00),(4,0.03),(6,0.05),(8,0.07),(10,0.09))` — vale a última faixa cujo
+  round é ≤ ao atual (rounds 1-3 = 0%, 10+ = 9%).
+- Nasce na posição do inimigo, cai até o chão, fica `lifetime` segundos e some. Coleta = `+amount`
+  vida, uma única vez (flag `collected`). Quem já está em `max_lives` não coleta (sobra para o aliado).
+- Travas de balanceamento (use `999` para desligar): `max_per_round` e `max_active` na tela.
+- O sorteio é independente do `roll_drop` comum (não divide o teto de drops de boosts/armas).
+
+### 2) Doação de vidas (`Game.try_donate`, `Player.revive`)
+
+- Ação **`donate_life`** por jogador, integrada ao `InputManager` e à tela de remapeamento:
+
+  | Jogador | Teclado | Controle |
+  |---|---|---|
+  | P1 | `E` | botão `Y` / ▲ |
+  | P2 | `SHIFT DIREITO` | idem |
+  | P3 | `U` | idem |
+  | P4 | `ENTER` do teclado numérico | idem |
+
+  Nenhuma colide com outra ação ou com teclas globais (há teste automático para isso).
+- **Quem pode ser revivido:** jogador **eliminado** (0 vidas, "GAME OVER"). A morte comum (perde 1 vida e
+  renasce em `RESPAWN_DELAY`) *não* é alvo: ela já volta sozinha.
+- **Regras:** doador ativo, com ≥ `min_donor_lives` (2) vidas; sem aliado eliminado, nada é consumido;
+  nunca doa para si; um acionamento = uma tentativa (borda de subida + `cooldown`).
+- **Vários mortos:** revive o eliminado **mais recentemente** (`Player.eliminated_at`). Doações no mesmo
+  quadro são processadas em sequência, então dois doadores nunca revivem o mesmo aliado.
+- O aliado volta com `revive_lives` (1) vida, `invuln` (3 s) de invulnerabilidade e em uma **posição segura**:
+  `Game._safe_spawn_x` escolhe o x mais distante de projéteis inimigos, inimigos baixos e hazards.
+- Feedback: coração pulsando + "PRECISA DE AJUDA" + tecla do doador sobre o aliado caído, "♥ AJUDA!" no
+  painel dele no HUD (some quando ninguém pode doar), corações/anéis/faíscas no renascimento.
+
+### 3) Hazards e fases (`hazards.py`)
+
+| Hazard | Quando existe | Como termina |
+|---|---|---|
+| **Black Saws** | junto do combate **e** durante todas as fases; saem quando o round fecha | nunca bloqueiam o round |
+| **Rockets** | fase própria, depois do combate | temporizador (`duration`) + todos os foguetes resolvidos |
+| **Ball Pod** | fase própria, depois do combate | todas as cápsulas **e** mini-esferas destruídas |
+| **Bouncing Spheres** | fase própria, depois do combate | todas as esferas destruídas (não termina por tempo) |
+
+Fluxo do round (`WaveManager`): `intro → active (combate) → hazard → clear`. O estado `hazard` só existe se o
+round tiver fases; sem fases é `active → clear` direto, como antes. Dentro de `hazard`, cada fase passa por
+`warn` (banner, nada nasce) → `run` → (`resolve`, só foguetes) → `cleared` ("HAZARD CLEARED!"); a próxima fase só
+começa depois. `WaveManager.update` só roda com o jogo em `playing`, então a **pausa** congela tudo sem código extra.
+
+Travas anti-impasse: objetos com NaN/fora do mundo são descartados; mini-esferas ignoradas estouram após
+`POD_BALL["life"]`; cada fase tem teto de `HAZARD_PHASE_TIMEOUT` (limpa o que sobrou) e a espera dos foguetes tem
+`HAZARD_RESOLVE_TIMEOUT`.
+
+**Como mudar a distribuição e a ordem por round** — edite `HAZARD_ROUNDS` em `settings.py`:
+
+```python
+9: dict(saws=2,                                   # nº de Black Saws durante o combate e as fases
+        order=("rockets", "ball_pod", "spheres"), # ordem das fases; omitir = fase não roda
+        rockets=dict(duration=13.0, interval=(0.60, 0.95), max_alive=5, mix=(("small", 4), ("medium", 4), ("large", 2))),
+        ball_pod=dict(pods=("release", "bounce", "release"), stagger=1.3),
+        spheres=dict(mix=(("light", 3), ("heavy", 2)), stagger=0.5)),
+```
+
+Só roda uma fase se ela estiver em `order` **e** tiver o bloco de configuração. Ex.: `order=("spheres","rockets")`
+inverte a ordem; `order=()` e `saws=0` desligam tudo (padrão do **round 10**, para não interferir nas 3 fases do chefe
+final). Quantidades e ritmo crescem `HAZARD_PLAYER_SCALE` (+20%) por jogador extra. No modo infinito (round > 10) o
+ciclo `HAZARD_ENDLESS_CYCLE` é reaproveitado com intensidade crescente. Tipos: `ROCKET_TYPES` (tamanho, hp, velocidade,
+raio no ar/no chão, pavio), `BALL_POD_TYPES`/`POD_BALL`, `SPHERE_TYPES`/`SPHERE_GRAVITY`, `BLACK_SAW`
+(`destructible=True` permite destruí-las a tiros).
+
+Colisões (`collisions.py`): `hazards_vs_arena` (foguete×chão, quique nas paredes/chão/teto), `hazards_vs_players`
+(contato; no máximo um golpe por jogador por quadro, e o jogador fica invulnerável após renascer) e tiros×hazards
+na mesma passada/grade espacial dos inimigos (`shots_vs_enemies`).
+
+### Testes desta rodada
+
+`python selftest_hazards.py` (headless, ~1 min): chance por round e taxa estatística, ciclo completo do item de
+vida, regras de doação (1-4 jogadores, vários mortos, mesmo quadro, posição segura), ordem das fases nos rounds 1-9,
+separação combate × fases, física de cada hazard, contato/dano único, pausa, morte de jogador no meio da fase,
+modo infinito, 4 dificuldades, boosts globais, reinício no meio de uma fase, partida completa de 10 rounds e desempenho.
 
 ## Próximos passos sugeridos (polimento, não funcionalidade)
 

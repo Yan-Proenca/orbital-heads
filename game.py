@@ -24,7 +24,7 @@ from pickup import Pickup
 from effects import Effects
 from wave import WaveManager
 from collisions import CollisionManager
-from utils import clamp, circle_hits_rect, mult_clamp, get_font
+from utils import clamp, circle_hits_rect, mult_clamp, get_font, draw_heart
 from menu_input import MenuInput
 from background import CityBackground
 import gamepad as GP
@@ -42,9 +42,9 @@ PAUSE_LABELS = {
 TITLE_ITEMS = ("start", "quit")
 TITLE_LABELS = {"start": "INICIAR JOGO", "quit": "SAIR DO JOGO"}
 
-REBIND_ACTIONS = ("left", "right", "jump", "dash", "fire")
+REBIND_ACTIONS = ("left", "right", "jump", "dash", "fire", "donate_life")
 REBIND_ACTION_LABELS = {"left": "MOVER ESQUERDA", "right": "MOVER DIREITA", "jump": "PULAR",
-                         "dash": "DASH", "fire": "ATIRAR"}
+                         "dash": "DASH", "fire": "ATIRAR", "donate_life": "DOAR VIDA"}
 
 # ----------------------------------------------------------------- menu de configuração de partida
 SETUP_STEPS = ("mode", "difficulty", "players")
@@ -89,6 +89,8 @@ class Game:
         self.just = set()
         self.rounds_completed = 0
         self.drops_this_round = 0
+        self.life_drops_this_round = 0      # itens de vida já dropados neste round (trava LIFE_BOOST["max_per_round"])
+        self.match_time = 0.0               # segundos de partida jogados (só corre em "playing"): ordena quem morreu primeiro
         self.drop_cd = 0.0
         self.breach_cd = 0.0
         self.title_t = 0.0
@@ -105,6 +107,7 @@ class Game:
         self.shake_mag = 0.0
         self.shake_off = (0, 0)
         self.banner = None
+        self._stripe_cache = {}             # faixas translúcidas do banner compacto (criadas 1x por cor)
         self.perf_level = 0
         self._fps_ema = S.FPS
 
@@ -125,6 +128,8 @@ class Game:
         self.wave.reset()
         self.rounds_to_win = S.GAME_MODES[self.game_mode]["rounds_to_win"]
         self.rounds_completed = 0
+        self.life_drops_this_round = 0
+        self.match_time = 0.0
         self.drop_cd = 0.0
         self.breach_cd = 0.0
         self.victory = False
@@ -444,10 +449,12 @@ class Game:
     # ------------------------------------------------------------ gameplay
     def update(self, dt):
         self._track_perf(dt)
+        self.match_time += dt
         self._update_global_effects(dt)
         self.wave.update(dt)
         for p in self.players:
             p.update(dt)
+        self._process_donations()
         mult = self.enemy_proj_mult
         for b in list(self.projectiles):
             b.update(dt, mult if b.owner is None else 1.0)
@@ -562,12 +569,43 @@ class Game:
     def aim_bullet(self, x, y, target, speed, off=0.0):
         return self.polar_bullet(x, y, math.atan2(target.x - x, target.y - 30 - y) + off, speed)
 
-    def area_blast(self, x, y, radius):
-        self.fx.blast(x, y, radius)
-        self.shake(0.18, 4)
+    def damage_in_circle(self, x, y, radius):
+        """Dano em área: cada jogador atingível dentro do círculo perde 1 vida (uma única vez: take_hit
+        deixa o jogador morto/invulnerável, então ele sai de can_be_hit no mesmo instante)."""
         for p in self.players:
             if p.can_be_hit() and circle_hits_rect(x, y, radius, p.hitbox()):
                 p.take_hit()
+
+    def area_blast(self, x, y, radius):
+        self.fx.blast(x, y, radius)
+        self.shake(0.18, 4)
+        self.damage_in_circle(x, y, radius)
+
+    def hazard_blast(self, h, mode):
+        """Explosão de um Rocket. mode='air' (destruído no ar / tocou num jogador): raio pequeno.
+        mode='ground' (pavio do chão acabou): raio grande, com anéis de onda de choque. Só detona 1 vez."""
+        if h.exploded:
+            return
+        h.exploded = True
+        h.alive = False
+        ground = mode == "ground"
+        radius = h.ground_radius if ground else h.air_radius
+        size, flash, ring, pal = h.fx_pack()
+        self.fx.explosion(h.x, h.y, size, flash, ring, pal, priority=ground and radius > 100)
+        self.audio.on_explosion(big=ground and radius > 100)
+        if ground:
+            self.area_blast(h.x, S.GROUND_Y - 6, radius)
+        else:
+            self.damage_in_circle(h.x, min(h.y, S.GROUND_Y - 4), radius)
+
+    def on_hazard_destroyed(self, h, killer):
+        """Hazard destruído por tiro: pontua o autor e dispara o efeito próprio do hazard."""
+        if killer is not None and h.points:
+            killer.score += h.points
+            killer.kills += 1
+            killer.kills_by_type[h.kind] = killer.kills_by_type.get(h.kind, 0) + 1
+            self.fx.popup(h.x, h.y - h.r, "+%d" % h.points, killer.cfg["color"], 18)
+        h.on_destroyed(self)
 
     def detonate(self, b, mode):
         if b.exploded:
@@ -588,6 +626,8 @@ class Game:
     def on_player_eliminated(self, p):
         if self.players and all(q.eliminated for q in self.players):
             self.end_match(False)
+        elif any(self.can_donate(q) for q in self.players if q is not p):
+            self.fx.popup(clamp(p.x, 110, S.WIDTH - 110), S.GROUND_Y - 124, "ALIADO CAÍDO!", S.LIFE_BOOST["color"], 22)
 
     def on_round_cleared(self, n):
         self.rounds_completed += 1
@@ -606,6 +646,7 @@ class Game:
             self.shake(0.25, 5)
         e.on_destroyed(self)
         self.roll_drop(e.kind, e.x, e.y)
+        self.roll_life_drop(e.kind, e.x, e.y)
         self.wave.remove_enemy(e)
 
     def on_projectile_destroyed(self, b, killer):
@@ -651,7 +692,13 @@ class Game:
             return
         pk.collected = True
         pk.alive = False
-        if pk.kind == "weapon":
+        if pk.kind == "life":
+            lc = S.LIFE_BOOST
+            p.lives = p.lives + lc["amount"] if lc["max_lives"] is None else min(lc["max_lives"], p.lives + lc["amount"])
+            col, text = lc["color"], "+%d VIDA" % lc["amount"]
+            self.audio.on_life_pickup()
+            self.fx.hearts(p.x, p.y - 60, col, n=6)
+        elif pk.kind == "weapon":
             p.set_weapon(pk.key)
             col, text = S.WEAPONS[pk.key]["color"] or "#ffffff", S.WEAPONS[pk.key]["name"]
             self.audio.on_pickup("weapon")
@@ -665,6 +712,116 @@ class Game:
             self.audio.on_pickup("boost", good=b["good"])
         self.fx.ring(p.x, p.y - 30, 10, 54, col, 0.4)
         self.fx.popup(p.x, p.y - 90, text, col, 18)
+
+    # ------------------------------------------------------------ boost de vida (item coletável)
+    def life_drop_chance(self, round_no=None):
+        """Chance por abate de largar uma vida no round (settings.LIFE_BOOST["chance_by_round"])."""
+        n = self.wave.round_no if round_no is None else round_no
+        chance = 0.0
+        for start, c in S.LIFE_BOOST["chance_by_round"]:
+            if n >= start:
+                chance = c
+        return chance
+
+    def roll_life_drop(self, kind, x, y):
+        """Sorteio independente do roll_drop comum: a vida tem chance, teto por round e teto na tela próprios."""
+        cfg = S.LIFE_BOOST
+        if self.state != "playing" or kind not in cfg["eligible"]:
+            return None
+        if self.life_drops_this_round >= cfg["max_per_round"]:
+            return None
+        if sum(1 for pk in self.pickups if pk.kind == "life" and pk.alive) >= cfg["max_active"]:
+            return None
+        if random.random() >= self.life_drop_chance():
+            return None
+        return self.spawn_life_pickup(x, y)
+
+    def spawn_life_pickup(self, x, y):
+        pk = Pickup("life", "life", clamp(x, 30, S.WIDTH - 30), clamp(y, S.HUD_H + 20, S.GROUND_Y - 60))
+        self.pickups.append(pk)
+        self.life_drops_this_round += 1
+        self.fx.ring(pk.x, pk.y, 6, 34, S.LIFE_BOOST["color"], 0.45, 3)
+        return pk
+
+    def can_collect(self, p, pk):
+        """Vida não é coletada por quem já está no teto de vidas (sobra para o aliado)."""
+        if pk.kind == "life":
+            cap = S.LIFE_BOOST["max_lives"]
+            return cap is None or p.lives < cap
+        return True
+
+    # ------------------------------------------------------------ doação de vidas entre jogadores
+    def revive_candidates(self):
+        """Jogadores ELIMINADOS (0 vidas) — o morto mais recentemente primeiro."""
+        return sorted((p for p in self.players if p.eliminated), key=lambda p: (p.eliminated_at, p.idx), reverse=True)
+
+    def can_donate(self, donor):
+        return donor.active and donor.lives >= S.LIFE_DONATION["min_donor_lives"]
+
+    def _donate_label(self, q):
+        """Tecla (ou botão de controle) que o jogador q usa para doar vida — mostrada na dica de ajuda."""
+        if self.input.player_uses_gamepad(q.idx):
+            slot = self.input.bindings[q.idx].gamepad_slot
+            return GP.button_label(S.GAMEPAD_BUTTONS["donate_life"], self.input.gamepad.family(slot))
+        return self.input.key_display(q.idx, "donate_life")
+
+    def revive_hint(self, target):
+        """Texto 'P1: E' se algum aliado pode doar uma vida a `target`; senão None (a dica some)."""
+        donors = [q for q in self.players if q is not target and self.can_donate(q)]
+        if not donors:
+            return None
+        q = max(donors, key=lambda d: d.lives)
+        return f"{q.short}: {self._donate_label(q)}"
+
+    def _process_donations(self):
+        for p in self.players:
+            if p.active and (p.prefix + "donate_life") in self.just:      # edge-trigger: 1 acionamento = 1 tentativa
+                self.try_donate(p)
+
+    def try_donate(self, donor):
+        """Doador vivo, com >= min_donor_lives vidas, revive o aliado eliminado mais recente. Se não houver
+        aliado a reviver ou o doador não tiver vidas, NADA é consumido."""
+        cfg = S.LIFE_DONATION
+        if not donor.active or donor.donate_cd > 0:
+            return False
+        donor.donate_cd = cfg["cooldown"]
+        targets = [t for t in self.revive_candidates() if t is not donor]
+        if not targets:
+            self.fx.popup(donor.x, donor.y - 110, "SEM ALIADO CAÍDO", "#9fb4c4", 16)
+            return False
+        if donor.lives < cfg["min_donor_lives"]:
+            self.fx.popup(donor.x, donor.y - 110, "PRECISA DE %d VIDAS" % cfg["min_donor_lives"], "#ffb04a", 16)
+            return False
+        target = targets[0]
+        donor.lives -= cfg["cost"]
+        target.revive(self._safe_spawn_x(target), cfg["revive_lives"], cfg["invuln"])
+        # feedback: doador (vida saindo), aliado (renascimento) e um aviso curto no centro
+        self.fx.hearts(donor.x, donor.y - 60, S.LIFE_BOOST["color"], n=4)
+        self.fx.popup(donor.x, donor.y - 112, "-%d VIDA" % cfg["cost"], S.LIFE_BOOST["color"], 20)
+        self.fx.revive(target.x, target.y, target.cfg["color"])
+        self.fx.popup(target.x, target.y - 118, "REVIVIDO!", target.cfg["color"], 20)
+        self.fx.popup(S.WIDTH // 2, S.HUD_H + 150, f"{donor.short} DOOU UMA VIDA PARA {target.short}", donor.cfg["color"], 20)
+        self.audio.on_revive()
+        return True
+
+    def _safe_spawn_x(self, target):
+        """Escolhe o x de renascimento mais longe de qualquer ameaça (projéteis inimigos, inimigos baixos,
+        hazards). Entre posições igualmente seguras, prefere a mais perto do ponto inicial do jogador."""
+        W, y = S.WIDTH, S.GROUND_Y - 30
+        threats = [(b.x, b.y, max(b.w, b.h) / 2 + (b.blast or 0) * 0.5)
+                   for b in self.projectiles if b.alive and b.owner is None]
+        threats += [(e.x, e.y, max(e.w, e.h) / 2) for e in self.wave.enemies
+                    if e.alive and e.contact_damage and not e.is_boss and e.y > S.GROUND_Y - 260]
+        threats += self.wave.hazards.threat_points()
+        home = target.cfg["spawn_x_frac"] * W
+        best_x, best_score = home, None
+        for i in range(25):
+            x = 70 + (W - 140) * i / 24
+            clearance = min((math.hypot(x - tx, y - ty) - tr for tx, ty, tr in threats), default=400.0)
+            score = min(clearance, 400.0) - abs(x - home) * 0.05
+            if best_score is None or score > best_score:
+                best_x, best_score = x, score
+        return best_x
 
     def determine_winner(self):
         """Vencedor por pontuação, desempatado por vidas restantes — funciona para 1 a 4 jogadores."""
@@ -710,8 +867,9 @@ class Game:
             ix = iy = 0
         self.shake_off = (ix, iy)
 
-    def show_banner(self, title, sub, color, duration, alert=False):
-        self.banner = dict(title=title, sub=sub, color=color, t=duration, alert=alert)
+    def show_banner(self, title, sub, color, duration, alert=False, compact=False):
+        """compact=True: faixa menor no topo da arena (não cobre o centro do combate) — usada pelos hazards."""
+        self.banner = dict(title=title, sub=sub, color=color, t=duration, alert=alert, compact=compact)
 
     # ------------------------------------------------------------ desenho
     def draw(self, surf):
@@ -797,6 +955,7 @@ class Game:
             block_w = (S.WIDTH - 32) // n
             slots = [(16 + i * block_w, True) for i in range(n)]
 
+        round_rect = pygame.Rect(S.WIDTH // 2 - 88, 8, 176, max(42, S.HUD_H - 18))
         for i, p in enumerate(self.players):
             x0, compact = slots[i] if i < len(slots) else (16, True)
             panel_w = block_w if n > 2 else min(250, S.WIDTH // 3)
@@ -815,24 +974,65 @@ class Game:
                 eff_x += chip.get_width() + 12
                 if eff_x > panel.right - 75:
                     eff_x, eff_y = panel.left + 13, eff_y + 13
+            # aliado eliminado que PODE ser revivido: coração pulsando + aviso (some se ninguém puder doar).
+            # O painel central do round fica por cima de parte dos painéis (3-4 jogadores): escolhe a primeira
+            # posição/texto que cabe dentro do painel sem encostar nele.
+            if p.eliminated and self.revive_hint(p) is not None:
+                beat = 0.5 + 0.5 * math.sin(self.match_time * 6.0)
+                placed = None
+                for label in ("PRECISA DE AJUDA", "AJUDA!"):
+                    msg = small.render(label, True, S.hx(S.LIFE_BOOST["light"]))
+                    for tx in (panel.left + 36, round_rect.right + 26):
+                        box = pygame.Rect(tx, eff_y, msg.get_width(), msg.get_height())
+                        if panel.contains(box) and not box.inflate(30, 0).colliderect(round_rect):
+                            placed = tx
+                            break
+                    if placed is not None:
+                        break
+                if placed is not None:
+                    draw_heart(surf, placed - 14, eff_y + 7, 11 + 3 * beat, S.hx(S.LIFE_BOOST["color"]), outline=(255, 255, 255))
+                    surf.blit(msg, (placed, eff_y))
 
         # Indicador central do round, em formato de módulo de telemetria.
-        round_rect = pygame.Rect(S.WIDTH // 2 - 88, 8, 176, max(42, S.HUD_H - 18))
         self._draw_sci_panel(surf, round_rect, accent=(255, 176, 74), fill=(15, 24, 34), radius=7, border=1)
         round_txt = font.render(f"ROUND {self.wave.round_no:02d}/{self.rounds_to_win:02d}", True, (255, 190, 94))
         surf.blit(round_txt, round_txt.get_rect(center=(round_rect.centerx, round_rect.centery)))
 
+        gx = round_rect.centerx
+        gy = round_rect.bottom + 2
+        for text, col in self.wave.hazards.hud_lines():       # progresso da fase de hazard atual (tempo/restantes)
+            chip = small.render(text, True, col)
+            surf.blit(chip, chip.get_rect(midtop=(gx, gy)))
+            gy += 13
         if self.global_effects:
-            gx = round_rect.centerx
-            gy = round_rect.bottom + 2
             for key, remaining in self.global_effects.items():
                 b = S.BOOSTS[key]
                 chip = small.render(f"{b['chip']} {remaining:0.1f}s", True, S.hx(b["color"]))
                 surf.blit(chip, chip.get_rect(midtop=(gx, gy)))
                 gy += 13
 
+    def _draw_compact_banner(self, surf):
+        b = self.banner
+        col = S.hx(b["color"]) if isinstance(b["color"], str) else b["color"]
+        cy = S.HUD_H + 60
+        if b.get("alert") and int(b["t"] * 4) % 2 == 0:
+            key = (col, S.WIDTH)
+            stripe = self._stripe_cache.get(key)
+            if stripe is None:
+                stripe = pygame.Surface((S.WIDTH, 74), pygame.SRCALPHA)
+                stripe.fill((*col, 38))
+                self._stripe_cache[key] = stripe
+            surf.blit(stripe, (0, cy - 38))
+        title = get_font(S.FONT_TITLE_NAME, 32).render(b["title"], True, col)
+        surf.blit(title, title.get_rect(center=(S.WIDTH // 2, cy - 6)))
+        sub = get_font(S.FONT_UI_NAME, 17).render(b["sub"], True, (230, 230, 240))
+        surf.blit(sub, sub.get_rect(center=(S.WIDTH // 2, cy + 22)))
+
     def _draw_banner(self, surf):
         b = self.banner
+        if b.get("compact"):
+            self._draw_compact_banner(surf)
+            return
         font_title = get_font(S.FONT_TITLE_NAME, 40)
         font_sub = get_font(S.FONT_UI_NAME, 20)
         if b.get("alert") and int(b["t"] * 4) % 2 == 0:

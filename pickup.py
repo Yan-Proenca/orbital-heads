@@ -1,6 +1,6 @@
 """
 pickup.py — item coletável que cai de um inimigo (porte de Pickup em main.py).
-kind = 'boost' (positivo/negativo) ou 'weapon'. Cai até o chão; depois de
+kind = 'boost' (positivo/negativo), 'weapon' ou 'life' (+1 vida, ver settings.LIFE_BOOST). Cai até o chão; depois de
 pousar fica disponível por PICKUP_LIFETIME (ou WEAPON_PICKUP_LIFETIME)
 segundos de jogo e some. Coletado por colisão real, uma única vez.
 """
@@ -9,7 +9,7 @@ import math
 import pygame
 
 import settings as S
-from utils import draw_glow_circle, clamp, pulse, get_font
+from utils import draw_glow_circle, draw_heart, clamp, pulse, get_font
 
 
 class Pickup:
@@ -20,7 +20,11 @@ class Pickup:
         self.x, self.y = x, y
         self.landed = False
         self.age = 0.0
-        self.life = S.PICKUP_LIFETIME if kind == "boost" else S.WEAPON_PICKUP_LIFETIME
+        if kind == "life":
+            self.life = S.LIFE_BOOST["lifetime"]
+        else:
+            self.life = S.PICKUP_LIFETIME if kind == "boost" else S.WEAPON_PICKUP_LIFETIME
+        self.t = 0.0                      # relógio de animação (corre também durante a queda)
         self.alive = True
         self.collected = False
         self.hb = self._hb()
@@ -30,12 +34,13 @@ class Pickup:
 
     @property
     def good(self):
-        return self.kind == "weapon" or S.BOOSTS[self.key]["good"]
+        return self.kind in ("weapon", "life") or S.BOOSTS[self.key]["good"]
 
     def remaining(self):
         return max(0.0, self.life - self.age) if self.landed else self.life
 
     def update(self, dt):
+        self.t += dt
         if not self.landed:
             self.y += S.PICKUP_FALL_SPEED * dt
             if self.y + self.R >= S.GROUND_Y:
@@ -71,7 +76,9 @@ class Pickup:
         pulse_speed = 3.0 + urgency * 9.0     # pulsa cada vez mais rápido perto de expirar
         glow_scale = 1.0 + urgency * 0.6       # e o halo cresce um pouco
 
-        if self.kind == "weapon":
+        if self.kind == "life":
+            self._draw_life(surf, x, y, R, glow_scale, pulse_speed)
+        elif self.kind == "weapon":
             self._draw_weapon(surf, font, x, y, glow_scale, pulse_speed)
         else:
             self._draw_boost(surf, font, x, y, R, glow_scale, pulse_speed)
@@ -91,6 +98,41 @@ class Pickup:
     @staticmethod
     def _lighten(color, amount=0.58):
         return Pickup._mix_color(color, (255, 255, 255), amount)
+
+    def _draw_life(self, surf, x, y, R, glow_scale, pulse_speed):
+        """Vida extra: cápsula escura com coração rosa luminoso, halo pulsante, anel de energia que
+        se expande e faíscas orbitando — leitura imediata (rosa/vermelho vivo) no meio do combate."""
+        cfg = S.LIFE_BOOST
+        base, light = S.hx(cfg["color"]), S.hx(cfg["light"])
+        beat = 0.5 + 0.5 * math.sin(self.t * pulse_speed)
+        draw_glow_circle(surf, x, y, 40 * glow_scale, base, intensity=pulse(self.t, pulse_speed, 0.55, 1.0), layers=4)
+
+        # anel de energia que nasce no item e se dissolve ao crescer
+        ph = (self.t * 1.3) % 1.0
+        ring_col = self._mix_color(light, (8, 16, 28), ph)
+        pygame.draw.circle(surf, ring_col, (x, y), int(R + 4 + 16 * ph), 2)
+
+        # faíscas orbitando o núcleo
+        for i in range(3):
+            a = self.t * 3.2 + i * math.tau / 3
+            sx, sy = x + math.cos(a) * (R + 9), y + math.sin(a) * (R + 9) * 0.8
+            pygame.draw.circle(surf, light, (int(sx), int(sy)), 2)
+            pygame.draw.circle(surf, (255, 255, 255), (int(sx), int(sy)), 1)
+
+        # cápsula: base escura + contorno luminoso + coração
+        pygame.draw.circle(surf, (7, 14, 24), (x, y), R + 3)
+        pygame.draw.circle(surf, light, (x, y), R + 3, width=2)
+        pygame.draw.circle(surf, self._mix_color(base, (7, 14, 24), 0.55), (x, y), R - 1)
+        draw_heart(surf, x, y + 1, 21 + 3 * beat, base, outline=(255, 255, 255))
+        pygame.draw.circle(surf, (255, 255, 255), (x - 4, y - 4), 2)
+
+        tag_font = get_font(S.FONT_UI_NAME, 11, bold=True)
+        txt = "+%d" % cfg["amount"]
+        shadow = tag_font.render(txt, True, (0, 0, 0))
+        tag = tag_font.render(txt, True, light)
+        pos = (x, y + R + 12)
+        surf.blit(shadow, shadow.get_rect(center=(pos[0] + 1, pos[1] + 1)))
+        surf.blit(tag, tag.get_rect(center=pos))
 
     def _draw_weapon(self, surf, font, x, y, glow_scale, pulse_speed):
         w = S.WEAPONS[self.key]

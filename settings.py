@@ -339,10 +339,10 @@ GAMEPAD_LED_COLORS = ["#37c8ff", "#ff9a3c", "#46f08a", "#b07cff"]
 # chance_by_round: pares (a_partir_do_round, chance_por_abate). Vale a última faixa cujo round <= atual.
 # Rounds 1-3 = 0%. max_per_round / max_active são travas de balanceamento (use 999 para desligar).
 LIFE_BOOST = dict(
-    chance_by_round=((1, 0.00), (4, 0.03), (6, 0.05), (8, 0.07), (10, 0.09)),
-    lifetime=8.0,              # segundos disponível depois de pousar (como WEAPON_PICKUP_LIFETIME)
+    chance_by_round=((1, 0.03), (4, 0.06), (6, 0.07), (8, 0.10), (10, 0.15)),
+    lifetime=5.0,              # segundos disponível depois de pousar (como WEAPON_PICKUP_LIFETIME)
     amount=1,                  # vidas concedidas ao coletar
-    max_lives=9,               # teto de vidas por jogador (None = sem teto)
+    max_lives=5,               # teto de vidas por jogador (None = sem teto)
     max_per_round=3,           # no máximo N itens de vida por round
     max_active=2,              # no máximo N itens de vida simultâneos na tela
     eligible=("drone", "ship", "machine", "mini", "jet", "car", "miniboss", "mothership"),
@@ -363,11 +363,11 @@ LIFE_DONATION = dict(
 # ----------------------------------------------------------------- hazards: fases depois do combate
 # Cada fase tem texto de aviso, cor e tempo de "aviso" (o hazard só nasce depois dele).
 HAZARD_PHASES = dict(
-    rockets=dict(banner="INCOMING ROCKETS!", sub="Desvie ou destrua os foguetes", color="#ff7a1a",
+    rockets=dict(banner="CHUVA DE FOGUETES!", sub="Desvie ou destrua os foguetes", color="#ff7a1a",
                  warn=1.8, hud="CHUVA DE FOGUETES"),
-    ball_pod=dict(banner="BALL POD DEPLOYED!", sub="Destrua as cápsulas e o que elas liberarem", color="#37c8ff",
-                  warn=1.8, hud="BALL POD"),
-    spheres=dict(banner="BOUNCING SPHERES!", sub="Destrua todas as esferas", color="#ffe14d",
+    ball_pod=dict(banner="CAPSULAS NASCERAM!", sub="Destrua as cápsulas e o que elas liberarem", color="#37c8ff",
+                  warn=1.8, hud="CAPSULAS"),
+    spheres=dict(banner="ESFERAS HORDA!", sub="Destrua todas as esferas", color="#ffe14d",
                  warn=1.8, hud="ESFERAS"),
 )
 HAZARD_CLEARED = dict(title="HAZARD CLEARED!", sub="Setor limpo", color="#46f08a", time=1.4)

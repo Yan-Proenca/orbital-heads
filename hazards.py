@@ -354,7 +354,10 @@ class BallPod(_Ball):
             self.timer = 0.0
         else:
             self.y = ARENA_T + self.r + 6
-            sp = cfg["speed"] * hz.diff_speed
+            # "bounce_mult" (padrão 1.0, sem efeito): reforço extra de velocidade só da variante "bounce",
+            # usado pelo modo Mechanic Room para o quique ficar mais intenso a cada ciclo — somado ao
+            # mesmo hz.diff_speed que já escala pods/esferas no Clássico/Ball Rain, nunca o substitui.
+            sp = cfg["speed"] * hz.diff_speed * hz.phase_cfg.get("bounce_mult", 1.0)
             self.speed = sp
             self.vx = random.choice((-1, 1)) * sp
             self.vy = 0.0
@@ -670,7 +673,11 @@ class HazardManager:
 
     @property
     def diff_speed(self):
-        return self.game.diff["enemy_speed"]
+        """Multiplicador de velocidade aplicado a pods/esferas ao nascer (fall_speed, speed, speed_x).
+        self.phase_cfg pode somar um fator extra via "speed_mult" (padrão 1.0, sem efeito) — usado pelo
+        modo Ball Rain (game_modes.py) para a chuva ficar mais rápida a cada round, sem mexer em
+        BallPod/BouncingSphere; o Clássico nunca define "speed_mult", então seu comportamento não muda."""
+        return self.game.diff["enemy_speed"] * self.phase_cfg.get("speed_mult", 1.0)
 
     def player_scale(self):
         return 1.0 + S.HAZARD_PLAYER_SCALE * max(0, len(self.game.players) - 1)

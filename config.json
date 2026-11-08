@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "audio": {
+    "music_volume": 15,
+    "sfx_volume": 34
+  },
+  "video": {
+    "width": 1280,
+    "height": 720,
+    "fullscreen": true
+  },
+  "controls": {},
+  "records": {
+    "rockets_sky": 131.71699999999996,
+    "ball_rain": 5,
+    "mechanic_room": 7,
+    "crazy_car": 6
+  }
+}

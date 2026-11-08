@@ -28,6 +28,8 @@ pygame.display.set_mode((1280, 720))
 import settings as S
 import hazards as HZ
 from game import Game
+from enemy import CyberCar
+from game_modes import CrazyCarMode
 from projectile import Projectile
 
 DT = 1 / 60
@@ -1052,6 +1054,538 @@ def test_desempenho_e_desenho():
         check(all(h.alive for h in lst), "objeto morto deixado na lista")
     os.makedirs("/tmp/shots", exist_ok=True)
     pygame.image.save(SCREEN, "/tmp/shots/hazards_scene.png")
+
+
+# ============================================================================= MODO ROCKETS SKY
+def test_rockets_sky_inicio_e_hud():
+    g = mk(1, mode="rockets_sky", seed=11)
+    check(g.mode_runner is not None, "mode_runner deveria existir em rockets_sky")
+    check(g.mode_runner.mode_key == "rockets_sky", "mode_key incorreto")
+    check(g.wave.state == "mode", f"WaveManager deveria estar em 'mode', está em {g.wave.state!r}")
+    check(g.wave.hazards.phase == "rockets", "fase deveria ser 'rockets' desde o início")
+    check(g.mode_runner.level == 1, "deveria começar no nível 1")
+    lines = g.mode_runner.hud_lines()
+    check(any("TEMPO" in t for t, _ in lines), f"HUD sem TEMPO: {lines}")
+    check(any("NÍVEL" in t for t, _ in lines), f"HUD sem NÍVEL: {lines}")
+    tick(g, 1, draw=True)     # garante que desenha sem estourar (HUD central + banner)
+
+
+def test_rockets_sky_progressao_exata_por_tempo():
+    """Teste 1 do design doc: a dificuldade sobe exatamente a cada 10s, nem antes nem depois."""
+    g = mk(1, mode="rockets_sky", seed=12)
+    mr = g.mode_runner
+    check(mr.level == 1, "nível inicial deveria ser 1")
+    tick(g, int(S.ROCKETS_SKY_LEVEL_INTERVAL * 60) - 2)
+    check(mr.level == 1, f"não deveria ter subido de nível ainda (nível={mr.level})")
+    tick(g, 3)
+    check(mr.level == 2, f"deveria estar no nível 2 logo após 10s (nível={mr.level})")
+    tick(g, int(S.ROCKETS_SKY_LEVEL_INTERVAL * 60) - 1)
+    check(mr.level == 3, f"deveria estar no nível 3 após 20s (nível={mr.level})")
+
+
+def test_rockets_sky_pausa_nao_avanca_timer():
+    """Teste 2 do design doc: pausado, o contador de sobrevivência não deve avançar."""
+    g = mk(1, mode="rockets_sky", seed=13)
+    tick(g, 120)
+    elapsed_before = g.mode_runner.elapsed
+    level_before = g.mode_runner.level
+    g.state = "paused"
+    for _ in range(60 * 5):
+        g.step(DT)
+    check(g.mode_runner.elapsed == elapsed_before, "o tempo de sobrevivência avançou durante a pausa")
+    check(g.mode_runner.level == level_before, "o nível subiu durante a pausa")
+    g.state = "playing"
+    tick(g, 60)
+    check(g.mode_runner.elapsed > elapsed_before, "o tempo deveria voltar a avançar após despausar")
+
+
+def test_rockets_sky_spawn_velocidade_e_quantidade_crescem():
+    """Níveis mais altos devem permitir mais foguetes simultâneos e foguetes mais rápidos (seção 5.3)."""
+    g = mk(2, mode="rockets_sky", seed=14)
+    mr = g.mode_runner
+    cfg_lvl1 = dict(mr.phase_cfg)
+    mr.level = S.ROCKETS_SKY_LEVEL_SOFTCAP
+    mr._apply_level_cfg()
+    cfg_softcap = mr.phase_cfg
+    check(cfg_softcap["max_alive"] >= cfg_lvl1["max_alive"],
+          f"max_alive não deveria cair com o nível ({cfg_lvl1['max_alive']} -> {cfg_softcap['max_alive']})")
+    check(cfg_softcap["speed_mult"] > cfg_lvl1["speed_mult"],
+          f"speed_mult deveria crescer com o nível ({cfg_lvl1['speed_mult']} -> {cfg_softcap['speed_mult']})")
+    check(cfg_softcap["interval"][1] <= cfg_lvl1["interval"][1],
+          "intervalo entre foguetes deveria diminuir (ou igual) em níveis mais altos")
+    # nunca "exploda": sempre dentro dos tetos configurados
+    check(cfg_softcap["max_alive"] <= S.ROCKETS_SKY_MAX_ALIVE[1] + 1e-9, "max_alive estourou o teto")
+    check(cfg_softcap["speed_mult"] <= S.ROCKETS_SKY_SPEED_MULT[1] + 1e-9, "speed_mult estourou o teto")
+    # além do softcap, a dificuldade não deve continuar crescendo (progressão controlada, nunca explosiva)
+    mr.level = S.ROCKETS_SKY_LEVEL_SOFTCAP + 5
+    mr._apply_level_cfg()
+    check(mr.phase_cfg["max_alive"] == cfg_softcap["max_alive"], "dificuldade não deveria crescer além do softcap")
+
+
+def test_rockets_sky_foguetes_nascem_e_ferem():
+    """Spawn real de foguetes ao longo do tempo, usando a física/colisão existente (Rocket/HazardManager)."""
+    g = mk(2, mode="rockets_sky", seed=15)
+    tick(g, 60 * 6, shield=False)       # 6s: tempo suficiente para vários foguetes nascerem e caírem
+    check(len(g.wave.hazards.rockets) > 0, "nenhum foguete chegou a nascer em 6s")
+    check(g.wave.cars == [] and g.wave.enemies == [], "rockets_sky não deveria ter inimigos/carros normais")
+
+
+def test_rockets_sky_gameover_e_recorde():
+    """Ciclo completo: jogador eliminado -> end_match -> recorde gravado (nunca pior que o anterior)."""
+    g = mk(1, mode="rockets_sky", seed=16)
+    tick(g, 30)
+    p = g.players[0]
+    p.effects.pop("shield", None)
+    p.lives = 0
+    p.eliminated = True
+    g.on_player_eliminated(p)
+    tick(g, 1)
+    check(g.state == "gameover", f"deveria ter terminado a partida, estado={g.state!r}")
+    check(g.mode_record_result is not None, "mode_record_result deveria estar preenchido")
+    is_new, record = g.mode_record_result
+    check(is_new is True, "primeiro resultado da sessão deveria virar recorde")
+    check(record == g.mode_runner.elapsed, "o recorde gravado deveria ser o tempo sobrevivido")
+    check(g.config.get_record("rockets_sky") == record, "recorde não refletido no ConfigManager")
+    result = dict(g.mode_runner.result_lines())
+    check("TEMPO DE SOBREVIVÊNCIA" in result, f"result_lines sem tempo: {result}")
+    check("NÍVEL DO FOGUETE" in result, f"result_lines sem nível: {result}")
+    check("MELHOR TEMPO" in result, f"result_lines sem melhor tempo: {result}")
+    tick(g, int(S.GAMEOVER_INPUT_LOCK * 60) + 5, draw=True)   # garante que a tela de resultado desenha sem estourar
+
+
+def test_rockets_sky_nao_quebra_classico_nem_endless():
+    """Depois de existir o modo survival, o Clássico e o 50 Rounds continuam com WaveManager normal."""
+    g = mk(2, mode="classic", seed=17)
+    check(g.mode_runner is None, "Clássico não deveria ter mode_runner")
+    check(g.wave.round_no == 1 and g.wave.state == "intro", "Clássico deveria começar no round 1 normalmente")
+    to_combat(g, 1)
+    check(g.wave.state == "active" and len(g.wave.enemies) > 0, "round 1 do Clássico sem inimigos")
+
+    g2 = mk(2, mode="endless", seed=18)
+    check(g2.mode_runner is None, "50 Rounds não deveria ter mode_runner")
+    check(g2.rounds_to_win == S.GAME_MODES["endless"]["rounds_to_win"], "rounds_to_win do 50 Rounds incorreto")
+
+
+# ============================================================================= MODO BALL RAIN
+def destroy_all_hazards(g, killer=None):
+    """Helper de teste: destrói (hit até a morte) todos os pods/esferas/mini-esferas vivos agora."""
+    killer = killer or g.players[0]
+    hz = g.wave.hazards
+    n = 0
+    for lst_name in ("pods", "spheres", "balls"):
+        for h in list(getattr(hz, lst_name)):
+            if h.alive and h.hp is not None:
+                if h.hit(h.hp + 1):
+                    g.on_hazard_destroyed(h, killer)
+                    n += 1
+    return n
+
+
+def test_ball_rain_inicio_e_hud():
+    g = mk(1, mode="ball_rain", seed=21)
+    check(g.mode_runner is not None, "mode_runner deveria existir em ball_rain")
+    check(g.mode_runner.mode_key == "ball_rain", "mode_key incorreto")
+    check(g.wave.state == "mode", f"WaveManager deveria estar em 'mode', está em {g.wave.state!r}")
+    check(g.mode_runner.round_no == 1, "deveria começar no round 1")
+    check(g.wave.hazards.phase == "ball_pod", "round 1 deveria começar com ball_pod")
+    tick(g, 1, draw=True)
+
+
+def test_ball_rain_so_pods_antes_do_round_de_esferas():
+    g = mk(1, mode="ball_rain", seed=22)
+    mr = g.mode_runner
+    for n in range(1, S.BALL_RAIN_SPHERES_START_ROUND):
+        pods, spheres = mr._counts_for_round(n)
+        check(spheres == 0, f"round {n} não deveria ter esferas ainda (spheres={spheres})")
+        check(pods > 0, f"round {n} deveria ter ao menos 1 pod")
+    pods, spheres = mr._counts_for_round(S.BALL_RAIN_SPHERES_START_ROUND)
+    check(spheres > 0, "a partir de BALL_RAIN_SPHERES_START_ROUND deveria haver esferas")
+
+
+def test_ball_rain_progressao_por_round():
+    """Teste dedicado: destruir tudo avança o round, aumentando pods/esferas a cada vez (com teto)."""
+    g = mk(2, mode="ball_rain", seed=23)
+    g.players[0].invuln = g.players[1].invuln = 999.0
+    seen_rounds = [1]
+    for _ in range(60 * 90):
+        tick(g, 1)
+        destroy_all_hazards(g)
+        if g.mode_runner.round_no != seen_rounds[-1]:
+            seen_rounds.append(g.mode_runner.round_no)
+        if len(seen_rounds) >= 6:
+            break
+    check(len(seen_rounds) >= 6, f"deveria ter avançado vários rounds, só chegou a {seen_rounds}")
+    check(seen_rounds == sorted(seen_rounds), f"rounds deveriam ser sempre crescentes: {seen_rounds}")
+    check(seen_rounds == list(range(1, len(seen_rounds) + 1)), f"rounds deveriam subir 1 a 1: {seen_rounds}")
+    pods_r1, _ = g.mode_runner._counts_for_round(1)
+    pods_r5, spheres_r5 = g.mode_runner._counts_for_round(5)
+    check(pods_r5 >= pods_r1, "quantidade de pods não deveria cair com o round")
+    check(pods_r5 <= S.BALL_RAIN_MAX_PODS, "pods estourou o teto")
+    check(spheres_r5 <= S.BALL_RAIN_MAX_SPHERES, "esferas estourou o teto")
+
+
+def test_ball_rain_velocidade_cresce_com_teto():
+    g = mk(1, mode="ball_rain", seed=24)
+    mr = g.mode_runner
+    mult_r1 = mr._speed_mult_for_round(1)
+    mult_mid = mr._speed_mult_for_round(20)
+    mult_far = mr._speed_mult_for_round(200)
+    check(mult_r1 == 1.0, f"round 1 deveria ter speed_mult 1.0, tem {mult_r1}")
+    check(mult_mid > mult_r1, "velocidade deveria crescer com o round")
+    check(mult_far <= S.BALL_RAIN_MAX_SPEED_MULT + 1e-9, "speed_mult nunca deveria estourar o teto")
+    check(abs(mult_far - S.BALL_RAIN_MAX_SPEED_MULT) < 1e-6,
+          "em round muito avançado, speed_mult deveria estar no teto")
+
+
+def test_ball_rain_wave_plan_nao_corrompe_entre_rounds():
+    """Regressão do bug: WaveManager não pode chamar _finish_round()/begin_round() por conta própria
+    enquanto um ModeManager está ativo (isso sobrescrevia hz.plan com o plano do round 1 clássico)."""
+    g = mk(1, mode="ball_rain", seed=25)
+    g.players[0].invuln = 999.0
+    for _ in range(60 * 30):
+        tick(g, 1)
+        destroy_all_hazards(g)
+    check(g.wave.state == "mode", f"wave.state vazou para {g.wave.state!r} (deveria continuar 'mode')")
+    order = g.wave.hazards.plan["order"] if g.wave.hazards.plan else ()
+    check(set(order) <= {"ball_pod", "spheres"}, f"hz.plan deveria ser do Ball Rain, veio {order}")
+    check(g.wave.round_no == 0, "WaveManager.round_no não deveria ter avançado (quem conta é o ModeManager)")
+
+
+def test_ball_rain_gameover_e_recorde():
+    g = mk(1, mode="ball_rain", seed=26)
+    tick(g, 30)
+    p = g.players[0]
+    p.effects.pop("shield", None)
+    p.lives = 0
+    p.eliminated = True
+    g.on_player_eliminated(p)
+    tick(g, 1)
+    check(g.state == "gameover", f"deveria ter terminado a partida, estado={g.state!r}")
+    is_new, record = g.mode_record_result
+    check(is_new is True, "primeiro resultado da sessão deveria virar recorde")
+    check(record == g.mode_runner.round_no, "recorde deveria ser o round alcançado")
+    check(g.config.get_record("ball_rain") == record, "recorde não refletido no ConfigManager")
+    result = dict(g.mode_runner.result_lines())
+    check("ROUND ALCANÇADO" in result and "MELHOR ROUND" in result, f"result_lines incompletas: {result}")
+    tick(g, int(S.GAMEOVER_INPUT_LOCK * 60) + 5, draw=True)
+
+
+def test_ball_rain_nao_quebra_classico_nem_rockets_sky():
+    """Depois do Ball Rain existir, Clássico e Rockets Sky continuam funcionando como antes."""
+    g = mk(2, mode="classic", seed=27)
+    check(g.mode_runner is None, "Clássico não deveria ter mode_runner")
+    to_combat(g, 5)       # round 5 do Clássico já tem ball_pod de verdade (HAZARD_ROUNDS)
+    check(g.wave.state == "active", "Clássico deveria estar em combate normal no round 5")
+
+    g2 = mk(1, mode="rockets_sky", seed=28)
+    tick(g2, 60 * 11)
+    check(g2.mode_runner.level == 2, f"Rockets Sky deveria seguir subindo de nível normalmente, nível={g2.mode_runner.level}")
+
+
+# ============================================================================= MODO MECHANIC ROOM
+def test_mechanic_room_inicio_e_hud():
+    g = mk(1, mode="mechanic_room", seed=31)
+    check(g.mode_runner is not None, "mode_runner deveria existir em mechanic_room")
+    check(g.mode_runner.mode_key == "mechanic_room", "mode_key incorreto")
+    check(g.wave.state == "mode", f"WaveManager deveria estar em 'mode', está em {g.wave.state!r}")
+    check(g.mode_runner.wave_no == 1, "deveria começar na wave 1")
+    check(g.wave.hazards.plan["cfg"]["ball_pod"]["pods"] == ("bounce",),
+          f"wave 1 deveria ter exatamente 1 cápsula 'bounce': {g.wave.hazards.plan['cfg']['ball_pod']['pods']}")
+    lines = g.mode_runner.hud_lines()
+    check(any("WAVE" in t for t, _ in lines), f"HUD sem WAVE: {lines}")
+    check(any("CÁPSULAS" in t and "PRÓXIMA" in t for t, _ in lines), f"HUD sem cápsulas/próxima: {lines}")
+    check(any("TEMPO" in t for t, _ in lines), f"HUD sem TEMPO: {lines}")
+    tick(g, 1, draw=True)
+
+
+def test_mechanic_room_incremento_de_um_por_ciclo():
+    """Seção 7.1: a cada ciclo concluído, +1 cápsula ricocheteante — nunca mais, nunca menos."""
+    g = mk(1, mode="mechanic_room", seed=32)
+    mr = g.mode_runner
+    for n in range(1, 10):
+        pods = mr._pods_for_wave(n)
+        check(pods == S.MECHANIC_ROOM_INITIAL_PODS + (n - 1) * S.MECHANIC_ROOM_POD_INCREMENT,
+              f"wave {n} deveria ter {S.MECHANIC_ROOM_INITIAL_PODS + (n - 1) * S.MECHANIC_ROOM_POD_INCREMENT} pods, calculou {pods}")
+    check(mr._pods_for_wave(1) == 1, "wave 1 deveria ter exatamente 1 cápsula (seção 7.2: TARGET: 1)")
+    check(mr._pods_for_wave(2) == 2, "wave 2 deveria ter exatamente 2 cápsulas (seção 7.2: TARGET: 2)")
+
+
+def test_mechanic_room_sem_teto_de_quantidade():
+    """Seção 7.2: 'não existe uma quantidade fixa máxima' para a contagem de cápsulas."""
+    g = mk(1, mode="mechanic_room", seed=33)
+    mr = g.mode_runner
+    pods_100 = mr._pods_for_wave(100)
+    pods_1000 = mr._pods_for_wave(1000)
+    check(pods_1000 > pods_100, "a quantidade de cápsulas não deveria ter teto (deve continuar subindo)")
+    check(pods_1000 == S.MECHANIC_ROOM_INITIAL_PODS + 999 * S.MECHANIC_ROOM_POD_INCREMENT,
+          "a fórmula de quantidade de cápsulas não deveria saturar em nenhum nível")
+
+
+def test_mechanic_room_velocidade_e_quique_tem_teto():
+    """Seção 7.4: velocidade e intensidade do quique aumentam, mas com teto (diferente da quantidade)."""
+    g = mk(1, mode="mechanic_room", seed=34)
+    mr = g.mode_runner
+    check(mr._speed_mult_for_wave(1) == 1.0, "wave 1 deveria ter speed_mult 1.0")
+    check(mr._bounce_mult_for_wave(1) == 1.0, "wave 1 deveria ter bounce_mult 1.0")
+    check(mr._speed_mult_for_wave(500) <= S.MECHANIC_ROOM_MAX_SPEED_MULT + 1e-9, "speed_mult estourou o teto")
+    check(mr._bounce_mult_for_wave(500) <= S.MECHANIC_ROOM_MAX_BOUNCE_MULT + 1e-9, "bounce_mult estourou o teto")
+    check(mr._speed_mult_for_wave(50) > mr._speed_mult_for_wave(10), "velocidade deveria crescer com a wave")
+    check(mr._bounce_mult_for_wave(50) > mr._bounce_mult_for_wave(10), "intensidade do quique deveria crescer com a wave")
+
+
+def test_mechanic_room_progressao_real_destruindo_capsulas():
+    """Ciclo completo de verdade: destruir todas as cápsulas de uma wave avança para a próxima,
+    sempre 1 a 1, limpando corretamente os objetos antigos (seção 7.3)."""
+    g = mk(1, mode="mechanic_room", seed=35)
+    g.players[0].invuln = 999.0
+    waves_seen = [1]
+    for _ in range(60 * 60):
+        tick(g, 1)
+        destroy_all_hazards(g)
+        if g.mode_runner.wave_no != waves_seen[-1]:
+            waves_seen.append(g.mode_runner.wave_no)
+        if len(waves_seen) >= 5:
+            break
+    check(waves_seen == list(range(1, len(waves_seen) + 1)), f"waves deveriam subir 1 a 1: {waves_seen}")
+    check(g.wave.hazards.pods == [] or all(p.alive for p in g.wave.hazards.pods),
+          "não deveria sobrar cápsula morta não removida (limpeza correta dos objetos antigos)")
+
+
+def test_mechanic_room_contagem_de_capsulas_destruidas():
+    """Seção 7.6: quantidade total de esferas/cápsulas destruídas deve ser registrada corretamente."""
+    g = mk(1, mode="mechanic_room", seed=36)
+    g.players[0].invuln = 999.0
+    p = g.players[0]
+    check(p.kills_by_type.get("pod", 0) == 0, "deveria começar com 0 cápsulas destruídas")
+    destroyed_total = 0
+    for _ in range(60 * 40):
+        tick(g, 1)
+        destroyed_total += destroy_all_hazards(g, killer=p)
+        if g.mode_runner.wave_no >= 4:
+            break
+    check(p.kills_by_type.get("pod", 0) == destroyed_total,
+          f"contagem de cápsulas destruídas incorreta: {p.kills_by_type.get('pod', 0)} vs {destroyed_total}")
+    result = dict(g.mode_runner.result_lines())
+    check(result["CÁPSULAS DESTRUÍDAS"] == str(destroyed_total), f"result_lines não bate: {result}")
+
+
+def test_mechanic_room_gameover_e_recorde():
+    g = mk(1, mode="mechanic_room", seed=37)
+    tick(g, 30)
+    p = g.players[0]
+    p.effects.pop("shield", None)
+    p.lives = 0
+    p.eliminated = True
+    g.on_player_eliminated(p)
+    tick(g, 1)
+    check(g.state == "gameover", f"deveria ter terminado a partida, estado={g.state!r}")
+    is_new, record = g.mode_record_result
+    check(is_new is True, "primeiro resultado da sessão deveria virar recorde")
+    check(record == g.mode_runner.wave_no, "recorde deveria ser a wave alcançada")
+    check(g.config.get_record("mechanic_room") == record, "recorde não refletido no ConfigManager")
+    result = dict(g.mode_runner.result_lines())
+    for key in ("MAIOR WAVE ALCANÇADA", "TEMPO SOBREVIVIDO", "CÁPSULAS DESTRUÍDAS", "MELHOR WAVE"):
+        check(key in result, f"result_lines sem {key}: {result}")
+    tick(g, int(S.GAMEOVER_INPUT_LOCK * 60) + 5, draw=True)
+
+
+def test_mechanic_room_nao_quebra_outros_modos():
+    g = mk(2, mode="classic", seed=38)
+    check(g.mode_runner is None, "Clássico não deveria ter mode_runner")
+    to_combat(g, 1)
+    check(g.wave.state == "active" and len(g.wave.enemies) > 0, "round 1 do Clássico sem inimigos")
+
+    g2 = mk(1, mode="ball_rain", seed=39)
+    tick(g2, 30)
+    check(g2.mode_runner.round_no == 1, "Ball Rain deveria continuar funcionando normalmente")
+
+    g3 = mk(1, mode="rockets_sky", seed=40)
+    tick(g3, 30)
+    check(g3.mode_runner.level == 1, "Rockets Sky deveria continuar funcionando normalmente")
+
+
+# ============================================================================= MODO CRAZY CAR
+def defeat_car(g, killer=None, max_frames=600):
+    """Helper de teste: pula no carro atual repetidamente (stomp real, respeitando stomp_lock) até ele
+    morrer. Dá mais 1 quadro após a morte para o CrazyCarMode.update() detectar isso e criar o carro
+    do próximo nível (_on_car_defeated/_spawn_car só rodam no próximo game.step(), nunca dentro do
+    próprio on_stomp) — assim quem chama este helper já lê g.mode_runner.car como o carro NOVO.
+    Checa car.alive diretamente: game.on_stomp() não repassa o retorno de car.stomp() para fora, então
+    não dá para confiar no valor de retorno de on_stomp aqui. Retorna True se uma derrota aconteceu."""
+    killer = killer or g.players[0]
+    for _ in range(max_frames):
+        car = g.mode_runner.car
+        if car.alive and car.stomp_lock <= 0:
+            g.on_stomp(car, killer)
+            if not car.alive:
+                tick(g, 1)      # deixa o CrazyCarMode.update() do próximo quadro criar o carro do novo nível
+                return True
+        tick(g, 1)
+    return False
+
+
+def test_crazy_car_inicio_e_hud():
+    g = mk(1, mode="crazy_car", seed=41)
+    check(g.mode_runner is not None, "mode_runner deveria existir em crazy_car")
+    check(g.mode_runner.mode_key == "crazy_car", "mode_key incorreto")
+    check(g.wave.state == "mode", f"WaveManager deveria estar em 'mode', está em {g.wave.state!r}")
+    check(g.mode_runner.level == 1, "deveria começar no nível 1")
+    car = g.mode_runner.car
+    check(car is not None and car.alive, "o carro deveria existir desde o início")
+    check(car.impacts_left == S.CRAZY_CAR_IMPACTS_BY_LEVEL[0], f"nível 1 deveria ter {S.CRAZY_CAR_IMPACTS_BY_LEVEL[0]} impactos")
+    check(car.phasing_enabled is True, "phasing deveria estar sempre ativo neste modo")
+    check(car in g.wave.cars and car in g.wave.enemies and car in g.wave.solos,
+          "o carro deveria estar nas listas normais do WaveManager (collisions.py depende delas)")
+    lines = g.mode_runner.hud_lines()
+    check(any("NÍVEL" in t for t, _ in lines), f"HUD sem NÍVEL: {lines}")
+    check(any("CARRO" in t for t, _ in lines), f"HUD sem referência ao carro: {lines}")
+    tick(g, 1, draw=True)
+
+
+def test_crazy_car_spawna_sempre_na_borda_direita():
+    """Teste 11 do design doc: nasce na borda direita, inclusive após reaparecer/avançar de nível."""
+    g = mk(1, mode="crazy_car", seed=42)
+    right_x = CyberCar.spawn_x()
+    check(abs(g.mode_runner.car.x - right_x) < 1.0, f"carro deveria nascer em x={right_x}, nasceu em {g.mode_runner.car.x}")
+    check(g.mode_runner.car.dir == -1, "carro nascido na direita deveria ir para a esquerda primeiro")
+    for _ in range(3):
+        ok = defeat_car(g)
+        check(ok, "não conseguiu derrotar o carro dentro do limite de quadros do teste")
+        check(abs(g.mode_runner.car.x - right_x) < 1.0,
+              f"carro do próximo nível deveria nascer em x={right_x}, nasceu em {g.mode_runner.car.x}")
+
+    # a mesma regra vale no Clássico e no 50 Rounds (seção 8.9) — checada aqui de novo por segurança,
+    # já que CyberCar.spawn_x() é compartilhado entre os três modos.
+    g2 = mk(2, mode="classic", seed=43)
+    to_combat(g2, 7)
+    car2 = g2.wave.cars[0] if g2.wave.cars else None
+    check(car2 is not None, "round 7 do Clássico deveria ter um CyberCar")
+    check(abs(car2.x - right_x) < 1.0, f"CyberCar do Clássico deveria nascer em x={right_x}, nasceu em {car2.x}")
+
+
+def test_crazy_car_derrota_e_fica_mais_dificil():
+    """Teste 5, 6 e 7 do design doc: carro derrotado -> nível sobe -> mais vida e mais velocidade."""
+    g = mk(1, mode="crazy_car", seed=44)
+    mr = g.mode_runner
+    levels_seen = [(mr.level, mr.car.impacts_max, mr.car.speed)]
+    for _ in range(4):
+        ok = defeat_car(g)
+        check(ok, "não conseguiu derrotar o carro")
+        levels_seen.append((mr.level, mr.car.impacts_max, mr.car.speed))
+    check([lv for lv, _, _ in levels_seen] == [1, 2, 3, 4, 5], f"níveis deveriam subir 1 a 1: {levels_seen}")
+    for i in range(1, len(levels_seen)):
+        _, impacts_prev, speed_prev = levels_seen[i - 1]
+        _, impacts_now, speed_now = levels_seen[i]
+        check(impacts_now >= impacts_prev, f"vida não deveria cair entre níveis: {levels_seen}")
+        check(speed_now > speed_prev, f"velocidade deveria crescer a cada nível: {levels_seen}")
+    check(mr.defeats == 4, f"deveria registrar 4 derrotas, registrou {mr.defeats}")
+    check([imp for _, imp, _ in levels_seen[:6]] == list(S.CRAZY_CAR_IMPACTS_BY_LEVEL[:5]),
+          f"tabela de impactos não bate com CRAZY_CAR_IMPACTS_BY_LEVEL: {levels_seen}")
+
+
+def test_crazy_car_vida_e_velocidade_tem_teto():
+    impacts_far = CrazyCarMode._impacts_for_level(500)
+    speed_far = CrazyCarMode._speed_for_level(500)
+    check(impacts_far <= S.CRAZY_CAR_MAX_IMPACTS, "impactos não deveriam ultrapassar o teto configurado")
+    check(speed_far <= S.CRAZY_CAR_MAX_SPEED + 1e-9, "velocidade não deveria ultrapassar o teto configurado")
+
+
+def test_crazy_car_turbo_progressivo():
+    """Teste 8: sem turbo nos primeiros níveis, turbo cada vez mais frequente depois."""
+    for lvl in range(1, S.CRAZY_CAR_TURBO_START_LEVEL):
+        turbo, chance = CrazyCarMode._turbo_for_level(lvl)
+        check(turbo is False, f"nível {lvl} não deveria ter turbo ainda")
+    turbo, chance_start = CrazyCarMode._turbo_for_level(S.CRAZY_CAR_TURBO_START_LEVEL)
+    check(turbo is True, f"nível {S.CRAZY_CAR_TURBO_START_LEVEL} deveria ativar o turbo")
+    _, chance_later = CrazyCarMode._turbo_for_level(S.CRAZY_CAR_TURBO_START_LEVEL + 5)
+    check(chance_later > chance_start, "a chance/frequência de turbo deveria crescer com o nível")
+    check(chance_later <= S.CRAZY_CAR_TURBO_CHANCE_MAX + 1e-9, "chance de turbo não deveria ultrapassar o teto")
+
+
+def test_crazy_car_foguetes_progressivos():
+    """Teste 9: sem foguetes nos primeiros níveis, foguetes cada vez mais presentes depois."""
+    for lvl in range(1, S.CRAZY_CAR_ROCKETS_START_LEVEL):
+        check(CrazyCarMode._rockets_for_level(lvl) is None, f"nível {lvl} não deveria ter foguetes ainda")
+    cfg_start = CrazyCarMode._rockets_for_level(S.CRAZY_CAR_ROCKETS_START_LEVEL)
+    check(cfg_start is not None, "nível de início dos foguetes deveria liberar foguetes")
+    cfg_later = CrazyCarMode._rockets_for_level(S.CRAZY_CAR_ROCKETS_START_LEVEL + 6)
+    check(cfg_later["max_alive"] >= cfg_start["max_alive"], "quantidade máxima de foguetes deveria crescer com o nível")
+    check(cfg_later["interval"][1] <= cfg_start["interval"][1], "frequência de foguetes deveria aumentar (intervalo menor)")
+    check(cfg_later["max_alive"] <= S.CRAZY_CAR_ROCKETS_MAX_ALIVE_CAP, "quantidade de foguetes estourou o teto")
+
+    # foguetes nascem de verdade quando o nível libera (física real, não só a config)
+    g = mk(1, mode="crazy_car", seed=45)
+    g.mode_runner.level = S.CRAZY_CAR_ROCKETS_START_LEVEL
+    g.mode_runner._spawn_car()
+    tick(g, 60 * 8)
+    check(len(g.wave.hazards.rockets) > 0, "nenhum foguete nasceu de verdade em 8s no nível com foguetes liberados")
+
+
+def test_crazy_car_phasing_completo():
+    """Teste 10 do design doc, dentro do fluxo oficial do CrazyCarMode (não isolado como na fundação)."""
+    g = mk(2, mode="crazy_car", seed=46)
+    p0, p1 = g.players
+    car = g.mode_runner.car
+    car.speed = 0.0
+    p0.x, p0.y, p0.vy, p0.on_ground, p0.invuln = car.x, car.hb[1] - 5, 300.0, False, 0.0
+    tick(g, 1, shield=False)
+    check(car.impacts_left == car.impacts_max - 1, "o pouso deveria contar como 1 impacto válido")
+    check(p0.standing is None, "o jogador não deveria ficar apoiado sobre o carro (phasing)")
+    check(car.is_phasing(p0) is True, "phasing deveria estar ativo para p0 logo após o impacto")
+    check(car.is_phasing(p1) is False, "phasing não deveria afetar p1, que nunca tocou o carro")
+    lives_before = p0.lives
+    for _ in range(50):
+        p0.vy = 50.0
+        tick(g, 1, shield=False)
+    check(p0.lives == lives_before, "não deveria haver dano de contato durante a janela de phasing")
+    # expira o phasing e encosta na lateral: a colisão deve voltar ao normal, sem dano duplicado/abrupto
+    tick(g, int(S.CRAZY_CAR_PLAYER_PHASING_DURATION * 60), shield=False)
+    car = g.mode_runner.car     # pode ter sido substituído se foi derrotado nesse meio-tempo; não deveria aqui
+    p0.x, p0.y = car.hb[0] - p0.HIT_W / 2 + 2, (car.hb[1] + car.hb[3]) / 2
+    p0.vy, p0.on_ground = 0.0, True
+    tick(g, 1, shield=False)
+    check(p0.lives == lives_before - 1, f"deveria ter tomado exatamente 1 dano ao encostar após o phasing: {p0.lives}")
+
+
+def test_crazy_car_gameover_e_recorde():
+    g = mk(1, mode="crazy_car", seed=47)
+    defeat_car(g)   # garante ao menos 1 derrota registrada antes do game over
+    p = g.players[0]
+    p.effects.pop("shield", None)
+    p.lives = 0
+    p.eliminated = True
+    g.on_player_eliminated(p)
+    tick(g, 1)
+    check(g.state == "gameover", f"deveria ter terminado a partida, estado={g.state!r}")
+    is_new, record = g.mode_record_result
+    check(is_new is True, "primeiro resultado da sessão deveria virar recorde")
+    check(record == g.mode_runner.level, "recorde deveria ser o nível do carro alcançado")
+    check(g.config.get_record("crazy_car") == record, "recorde não refletido no ConfigManager")
+    result = dict(g.mode_runner.result_lines())
+    for key in ("NÍVEL DO CARRO", "CARROS DERROTADOS", "MELHOR NÍVEL"):
+        check(key in result, f"result_lines sem {key}: {result}")
+    tick(g, int(S.GAMEOVER_INPUT_LOCK * 60) + 5, draw=True)
+
+
+def test_crazy_car_1_a_4_jogadores():
+    """Teste 12 (parcial, para este modo): o Crazy Car deve funcionar igual com 1 a 4 jogadores."""
+    for n in (1, 2, 3, 4):
+        g = mk(n, mode="crazy_car", seed=48 + n)
+        check(len(g.players) == n, f"deveria ter {n} jogadores")
+        check(g.mode_runner.car is not None and g.mode_runner.car.alive, f"carro deveria existir com {n} jogadores")
+        tick(g, 30, draw=True)
+        check(g.wave.state == "mode", f"wave.state deveria continuar 'mode' com {n} jogadores")
+
+
+def test_crazy_car_nao_quebra_outros_modos():
+    g = mk(2, mode="classic", seed=52)
+    check(g.mode_runner is None, "Clássico não deveria ter mode_runner")
+    to_combat(g, 1)
+    check(g.wave.state == "active" and len(g.wave.enemies) > 0, "round 1 do Clássico sem inimigos")
+
+    g2 = mk(1, mode="mechanic_room", seed=53)
+    tick(g2, 30)
+    check(g2.mode_runner.wave_no == 1, "Mechanic Room deveria continuar funcionando normalmente")
 
 
 TESTS = [v for k, v in sorted(globals().items(), key=lambda kv: kv[1].__code__.co_firstlineno if callable(kv[1]) and hasattr(kv[1], "__code__") else 0)

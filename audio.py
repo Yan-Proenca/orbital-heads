@@ -78,8 +78,8 @@ class AudioManager:
         if not (self._mixer_ok and self.sfx_enabled):
             return
         snd = self._sfx.get(name)
-        if snd is None:
-            return
+        if snd is None or self.sfx_volume * volume_scale <= 0.0:
+            return                                  # volume 0% = mudo de verdade (nem ocupa um canal do mixer)
         if cooldown > 0:
             now = pygame.time.get_ticks() / 1000.0
             last = self._channel_cooldown.get(name, -999)
@@ -93,6 +93,14 @@ class AudioManager:
         self.sfx_volume = max(0.0, min(1.0, vol))
         for snd in self._sfx.values():
             snd.set_volume(self.sfx_volume)
+
+    @property
+    def music_percent(self):
+        return int(round(self.music_volume * 100))
+
+    @property
+    def sfx_percent(self):
+        return int(round(self.sfx_volume * 100))
 
     def toggle_sfx(self):
         self.sfx_enabled = not self.sfx_enabled

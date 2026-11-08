@@ -197,14 +197,103 @@ DIFFICULTIES = {
 #            encontros especiais do 5 ao 10 ainda acontecem nessas posições,
 #            mas não se repetem depois — do round 11 em diante é só a
 #            progressão padrão (drones/naves/máquinas), cada vez mais forte.
-GAME_MODE_ORDER = ("classic", "endless")
+# "rockets_sky" / "ball_rain" / "mechanic_room" / "crazy_car": modos de sobrevivência à parte dos 10 rounds
+# clássicos, tocados por game_modes.py (ModeManager) em vez do WaveManager de 10 rounds. Cada um tem sua
+# própria progressão (ver bloco "MODOS DE SOBREVIVÊNCIA" abaixo) e reaproveita WaveManager/HazardManager/
+# CyberCar sem copiá-los — só reorganiza QUANDO e O QUÊ nasce.
+GAME_MODE_ORDER = ("classic", "endless", "rockets_sky", "ball_rain", "mechanic_room", "crazy_car")
 DEFAULT_GAME_MODE = "classic"
 GAME_MODES = {
     "classic": dict(label="CLÁSSICO", rounds_to_win=10,
                      desc="A campanha original: 10 rounds, terminando no Chefe Final."),
     "endless": dict(label="ONDAS INFINITAS", rounds_to_win=50,
                      desc="Até 50 rounds: a campanha clássica seguida de ondas cada vez mais difíceis."),
+    "rockets_sky": dict(label="ROCKETS SKY", rounds_to_win=None, survival=True,
+                         desc="SOBREVIVA À CHUVA DE FOGUETES. ATÉ QUANDO VOCÊ AGUENTA?"),
+    "ball_rain": dict(label="BALL RAIN", rounds_to_win=None, survival=True,
+                       desc="SOBREVIVA ÀS CÁPSULAS E ESFERAS. A CHUVA NUNCA FICA MAIS FÁCIL."),
+    "mechanic_room": dict(label="MECHANIC ROOM", rounds_to_win=None, survival=True,
+                           desc="DESTRUA MAIS CÁPSULAS RICOCHETEANTES A CADA ONDA. ATÉ ONDE VOCÊ CHEGA?"),
+    "crazy_car": dict(label="CRAZY CAR", rounds_to_win=None, survival=True,
+                       desc="DERROTE O CARRO. ELE SEMPRE VOLTA MAIS FORTE."),
 }
+# Modos cuja partida é dirigida por um ModeManager (game_modes.py) em vez da progressão clássica de rounds.
+SURVIVAL_GAME_MODES = tuple(k for k in GAME_MODE_ORDER if GAME_MODES[k].get("survival"))
+
+# ----------------------------------------------------------------- MODOS DE SOBREVIVÊNCIA (game_modes.py)
+# Todos os números usados pelos 4 modos novos ficam centralizados aqui; nada fica fixo nas classes dos modos.
+
+# --- Rockets Sky: progressão por TEMPO. Nível sobe a cada ROCKETS_SKY_LEVEL_INTERVAL segundos sobrevividos;
+# cada variável de dificuldade cresce suavemente com teto (fácil no começo, bem difícil perto de 1-2 min).
+# Tocado via HazardManager (mesma classe Rocket/mesma fase "rockets" do modo Clássico) com phase_cfg
+# recalculado a cada nível — nunca entra em "resolve"/"cleared": a chuva é contínua até o jogo acabar.
+ROCKETS_SKY_LEVEL_INTERVAL = 10.0          # segundos por nível
+ROCKETS_SKY_LEVEL_SOFTCAP = 12             # nível em que a curva já desacelerou bastante (~2 min = nível 12)
+ROCKETS_SKY_MAX_ALIVE = (2, 10)            # (nível 1, teto) foguetes simultâneos em tela
+ROCKETS_SKY_INTERVAL = ((1.00, 1.50), (0.30, 0.55))   # (nível 1, teto) intervalo (min,max) entre spawns
+ROCKETS_SKY_SPEED_MULT = (0.85, 1.65)      # (nível 1, teto) multiplicador sobre ROCKET_TYPES[...]["speed"]
+ROCKETS_SKY_MIX_BY_LEVEL = (                # (nível_mínimo, mix) — como HAZARD_ROUNDS; vale a última faixa válida
+    (1, (("small", 7), ("medium", 1))),
+    (3, (("small", 6), ("medium", 3))),
+    (5, (("small", 4), ("medium", 4), ("large", 1))),
+    (8, (("small", 3), ("medium", 4), ("large", 3))),
+)
+ROCKETS_SKY_FIRST_DELAY = 0.6              # atraso (s) antes do primeiro foguete, dá tempo de ler o banner
+
+# --- Ball Rain: progressão por ROUND (mesmas peças de Ball Pod/Spheres do clássico, isoladas e infinitas).
+BALL_RAIN_INITIAL_PODS = 2                 # round 1
+BALL_RAIN_POD_INCREMENT = 1                # +1 cápsula por round, até o teto abaixo
+BALL_RAIN_MAX_PODS = 10
+BALL_RAIN_SPHERES_START_ROUND = 3          # a partir deste round passa a combinar Ball Pod + Spheres
+BALL_RAIN_INITIAL_SPHERES = 2
+BALL_RAIN_SPHERE_INCREMENT = 1
+BALL_RAIN_MAX_SPHERES = 12
+BALL_RAIN_STAGGER = (1.5, 0.5)             # (round 1, teto) segundos entre nascimentos dentro de uma fase
+BALL_RAIN_SPEED_GROWTH_PER_ROUND = 0.035   # crescimento de velocidade acumulado por round
+BALL_RAIN_MAX_SPEED_MULT = 2.0
+
+# --- Mechanic Room: progressão por QUANTIDADE DE CÁPSULAS RICOCHETEANTES (a entidade é BallPod variante
+# "bounce" — o design doc chama de "esfera"/"cápsula ricocheteante" de forma intercambiável, mas é a
+# mesma classe BallPod já usada no Clássico/Ball Rain, nunca BouncingSphere). Sem teto de quantidade
+# (design doc 7.2: "não existe uma quantidade fixa máxima") — só velocidade/quique têm teto (7.4).
+MECHANIC_ROOM_INITIAL_PODS = 1             # "TARGET: 1" / WAVE 1 (seção 7.2)
+MECHANIC_ROOM_POD_INCREMENT = 1            # +1 por ciclo concluído (seção 7.1/7.3)
+MECHANIC_ROOM_SPEED_INCREMENT = 0.045      # +4.5% de velocidade de translação por ciclo concluído...
+MECHANIC_ROOM_MAX_SPEED_MULT = 2.4         # ...até este teto
+# "Intensidade dos quiques" (7.4): BallPod "bounce" não tem gravidade/bounce_v como BouncingSphere —
+# ele ricocheteia nas paredes invertendo vx/vy sem mudar a magnitude (ver BallPod.resolve_arena, que
+# não é alterado). Este multiplicador soma-se ao de velocidade só no nascimento do pod (self.speed),
+# via hz.phase_cfg["bounce_mult"]: um pod mais "intenso" nasce já mais rápido, e cada ricochete reflete
+# essa magnitude maior — sem reescrever a física de colisão com a parede.
+MECHANIC_ROOM_BOUNCE_INCREMENT = 0.02      # +2% de intensidade por ciclo concluído, além da velocidade base...
+MECHANIC_ROOM_MAX_BOUNCE_MULT = 1.6        # ...até este teto
+MECHANIC_ROOM_MAX_ACTIVE = 40              # trava técnica de performance (nunca alcançável normalmente)
+
+# --- Crazy Car: progressão por NÍVEL DO CARRO (a cada derrota, ele volta mais forte).
+CRAZY_CAR_INITIAL_IMPACTS = 3
+CRAZY_CAR_IMPACTS_BY_LEVEL = (3, 4, 5, 6, 8, 10)    # níveis 1-6; acima disso usa CRAZY_CAR_IMPACTS_GROWTH
+CRAZY_CAR_IMPACTS_GROWTH = 2                # níveis acima da tabela: +2 por nível
+CRAZY_CAR_MAX_IMPACTS = 40
+CRAZY_CAR_SPEED_INCREMENT = 14.0            # px/s por nível
+CRAZY_CAR_MAX_SPEED = 420.0
+CRAZY_CAR_TURBO_START_LEVEL = 5
+CRAZY_CAR_TURBO_CHANCE_BY_LEVEL = 0.12      # chance extra de turbo por nível acima do início, com teto abaixo
+CRAZY_CAR_TURBO_CHANCE_MAX = 0.85
+CRAZY_CAR_ROCKETS_START_LEVEL = 4
+CRAZY_CAR_ROCKETS_MAX_ALIVE_BY_LEVEL = 1    # +1 foguete simultâneo permitido por nível acima do início
+CRAZY_CAR_ROCKETS_MAX_ALIVE_CAP = 5
+CRAZY_CAR_ROCKETS_INTERVAL = (3.2, 1.1)     # (no nível inicial de foguetes, teto) segundos entre foguetes
+CRAZY_CAR_ROCKETS_LARGE_LEVEL = 9           # a partir deste nível, foguetes médios entram na mistura
+
+# Phasing + cooldown de dano ao aterrissar sobre o Crazy Car (ver player.py/collisions.py). Mesmo espírito
+# de Player.invuln, mas restrito ao contato com o carro: nenhuma outra fonte de dano é afetada.
+CRAZY_CAR_PLAYER_PHASING_DURATION = 2.0
+CRAZY_CAR_PLAYER_DAMAGE_COOLDOWN = 2.0
+
+# Posição de nascimento do Crazy Car: sempre perto da borda direita da arena (Clássico, 50 Rounds e
+# Crazy Car usam a mesma regra, centralizada em CyberCar.spawn_x()).
+CRAZY_CAR_SPAWN_SIDE = "right"
+CRAZY_CAR_SPAWN_MARGIN = 70.0               # distância da borda até o centro do carro ao nascer
 
 # ----------------------------------------------------------------- armas
 WEAPONS = {
@@ -339,10 +428,10 @@ GAMEPAD_LED_COLORS = ["#37c8ff", "#ff9a3c", "#46f08a", "#b07cff"]
 # chance_by_round: pares (a_partir_do_round, chance_por_abate). Vale a última faixa cujo round <= atual.
 # Rounds 1-3 = 0%. max_per_round / max_active são travas de balanceamento (use 999 para desligar).
 LIFE_BOOST = dict(
-    chance_by_round=((1, 0.03), (4, 0.06), (6, 0.07), (8, 0.10), (10, 0.15)),
-    lifetime=5.0,              # segundos disponível depois de pousar (como WEAPON_PICKUP_LIFETIME)
+    chance_by_round=((1, 0.00), (4, 0.03), (6, 0.05), (8, 0.07), (10, 0.09)),
+    lifetime=8.0,              # segundos disponível depois de pousar (como WEAPON_PICKUP_LIFETIME)
     amount=1,                  # vidas concedidas ao coletar
-    max_lives=5,               # teto de vidas por jogador (None = sem teto)
+    max_lives=9,               # teto de vidas por jogador (None = sem teto)
     max_per_round=3,           # no máximo N itens de vida por round
     max_active=2,              # no máximo N itens de vida simultâneos na tela
     eligible=("drone", "ship", "machine", "mini", "jet", "car", "miniboss", "mothership"),
@@ -363,11 +452,11 @@ LIFE_DONATION = dict(
 # ----------------------------------------------------------------- hazards: fases depois do combate
 # Cada fase tem texto de aviso, cor e tempo de "aviso" (o hazard só nasce depois dele).
 HAZARD_PHASES = dict(
-    rockets=dict(banner="CHUVA DE FOGUETES!", sub="Desvie ou destrua os foguetes", color="#ff7a1a",
+    rockets=dict(banner="INCOMING ROCKETS!", sub="Desvie ou destrua os foguetes", color="#ff7a1a",
                  warn=1.8, hud="CHUVA DE FOGUETES"),
-    ball_pod=dict(banner="CAPSULAS NASCERAM!", sub="Destrua as cápsulas e o que elas liberarem", color="#37c8ff",
-                  warn=1.8, hud="CAPSULAS"),
-    spheres=dict(banner="ESFERAS HORDA!", sub="Destrua todas as esferas", color="#ffe14d",
+    ball_pod=dict(banner="BALL POD DEPLOYED!", sub="Destrua as cápsulas e o que elas liberarem", color="#37c8ff",
+                  warn=1.8, hud="BALL POD"),
+    spheres=dict(banner="BOUNCING SPHERES!", sub="Destrua todas as esferas", color="#ffe14d",
                  warn=1.8, hud="ESFERAS"),
 )
 HAZARD_CLEARED = dict(title="HAZARD CLEARED!", sub="Setor limpo", color="#46f08a", time=1.4)
@@ -461,3 +550,38 @@ BLACK_SAW = dict(radius=27, speed=330.0, spawn_warn=1.4, margin=6, corner_radius
                  alternate_direction=True,  # serras vizinhas giram em sentidos opostos
                  destructible=False, hp=14,  # True: tiros dos jogadores podem destruí-las
                  spark_interval=(0.18, 0.45))
+
+
+# ----------------------------------------------------------------- recordes dos modos de sobrevivência
+# Cada modo guarda seu próprio recorde (nunca misturados), persistido em config.json junto com áudio/vídeo/
+# controles (ver config.py). RECORD_FIELD diz qual campo do resultado de cada modo vira o "recorde": tempo
+# para Rockets Sky, round/wave/level para os demais (quanto maior, melhor em todos os casos aqui).
+RECORD_FIELD = {"rockets_sky": "time", "ball_rain": "round", "mechanic_room": "wave", "crazy_car": "level"}
+
+# =====================================================================================
+# RODADA 5 — MENU AVANÇADO DE CONFIGURAÇÕES (áudio/vídeo/controles) + config.json
+# =====================================================================================
+import os as _os
+
+# Arquivo de configuração persistente. ORBITAL_CONFIG=/outro/caminho.json muda o local (útil em testes).
+CONFIG_PATH = _os.environ.get("ORBITAL_CONFIG") or _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "config.json")
+CONFIG_VERSION = 1
+
+# --- vídeo -----------------------------------------------------------------------------
+# O jogo sempre desenha em WIDTH x HEIGHT (1280x720) e é ESCALADO para a resolução escolhida, com barras
+# pretas se o monitor não for 16:9 (nunca estica). Só aparecem as resoluções que o monitor/pygame suportam.
+RESOLUTION_CANDIDATES = ((1024, 576), (1280, 720), (1366, 768), (1600, 900), (1920, 1080))
+RESOLUTION_MAX = (2560, 1440)      # modos extras 16:9 vindos de pygame.display.list_modes() até este tamanho
+
+# --- controles -------------------------------------------------------------------------
+CONTROL_ACTIONS = ("left", "right", "jump", "dash", "fire", "donate_life")
+CONTROL_LABELS = {"left": "MOVER ESQUERDA", "right": "MOVER DIREITA", "jump": "PULAR",
+                  "dash": "DASH", "fire": "ATIRAR", "donate_life": "DOAR VIDA"}
+CONTROL_DEVICES = ("keyboard", "xbox", "playstation")
+CONTROL_DEVICE_LABELS = {"keyboard": "TECLADO", "xbox": "XBOX", "playstation": "PLAYSTATION"}
+PAD_DEVICES = ("xbox", "playstation")          # perfis de controle (Switch/genérico usam o perfil "xbox")
+PAD_ACTIONS = ("jump", "dash", "fire", "donate_life")   # remapeáveis no controle; mover = direcional/analógico (fixo)
+PAD_BINDABLE = ("a", "b", "x", "y", "lb", "rb", "back")  # "start" fica reservado para pausar
+RESERVED_KEYS = ("escape", "f11", "f")         # ESC = pausa/cancela, F11/F = tela cheia: não podem ser atalhos
+VOLUME_STEP = 5                                # passo (%) de teclado/controle nos sliders
+CAPTURE_TIMEOUT = 10.0                         # segundos esperando um novo botão antes de cancelar sozinho

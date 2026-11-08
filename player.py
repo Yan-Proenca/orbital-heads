@@ -178,11 +178,20 @@ class Player:
 
         # --- chão ou plataforma móvel (topo do carro): só pousa descendo
         floor, support = float(S.GROUND_Y), None
+        landed_car = None       # carro cujo topo foi tocado neste quadro (phasing: vira impacto, não apoio)
         for car in g.wave.cars:
             if (car.alive and self.vy >= 0 and self.prev_y <= car.hb[1] + 6 and self.y >= car.hb[1]
                     and self.x + self.HIT_W / 2 > car.hb[0] and self.x - self.HIT_W / 2 < car.hb[2]
                     and car.hb[1] < floor):
-                floor, support = car.hb[1], car
+                if getattr(car, "phasing_enabled", False):
+                    landed_car = car            # phasing: nunca vira "floor" — tratado à parte abaixo
+                else:
+                    floor, support = car.hb[1], car
+        if landed_car is not None and not landed_car.is_phasing(self):
+            # Primeiro contato com o topo (fora da janela de phasing): conta como impacto e ativa o
+            # phasing — a partir daqui o jogador atravessa o carro pelo tempo configurado.
+            g.on_stomp(landed_car, self)
+            self.vy = max(self.vy, 40.0)       # continua a queda através do carro, sem ficar colado no topo
         if self.y >= floor:
             if not self.on_ground and self.vy > 120:
                 self.squash = 1.0

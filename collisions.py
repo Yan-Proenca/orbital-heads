@@ -100,6 +100,10 @@ class CollisionManager:
             for e in enemies:
                 if not e.alive or not e.contact_damage or p.standing is e:
                     continue
+                # Crazy Car com phasing: durante a janela pós-impacto o carro não causa dano de contato
+                # a ESTE jogador (outros jogadores e outras fontes de dano continuam normais).
+                if getattr(e, "phasing_enabled", False) and e.damage_on_cooldown(p):
+                    continue
                 eh = e.hb
                 if eh[0] < hb[2] and eh[2] > hb[0] and eh[1] < hb[3] and eh[3] > hb[1]:
                     p.take_hit()

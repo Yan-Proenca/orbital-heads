@@ -141,7 +141,7 @@ class WaveManager:
         elif k == "finalboss":
             self._add_solo(FinalBoss(self, S.WIDTH / 2, sc(S.ENEMY_TYPES["finalboss"]["hp"])))
         elif k == "car":
-            car = CyberCar(self, S.WIDTH / 2, S.CAR["speed"] * sp.get("speed_mult", 1.0) * self.diff_speed,
+            car = CyberCar(self, speed=S.CAR["speed"] * sp.get("speed_mult", 1.0) * self.diff_speed,
                             turbo=sp.get("turbo", False))
             self._add_solo(car)
             self.cars.append(car)
@@ -223,6 +223,12 @@ class WaveManager:
             self.hazards.update(dt)
             if self.hazards.sequence_done:
                 self._finish_round()
+        elif self.state == "mode":
+            # Usado pelos ModeManagers de sobrevivência (game_modes.py): só roda a física/colisão dos
+            # hazards a cada quadro. Diferente de "hazard", NUNCA reage a hazards.sequence_done chamando
+            # _finish_round() — quem decide o que acontece quando uma fase/rodada termina é o próprio
+            # ModeManager (ele mesmo lê hazards.sequence_done e decide o que fazer, round a round).
+            self.hazards.update(dt)
         elif self.state == "clear":
             self.timer -= dt
             if self.timer <= 0:

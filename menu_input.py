@@ -16,6 +16,9 @@ Como funciona:
                                clique esquerdo confirmou um item;
         draw_cursor(surf)   -> desenha um cursor de mouse visível por cima
                                de tudo, para o jogador saber onde está.
+  - Mouse em COORDENADAS LÓGICAS: quando o jogo roda numa resolução diferente de 1280x720 (display.py), o
+    Game aponta `pos_transform` para DisplayManager.to_logical e toda a leitura do mouse (hover, clique,
+    arrasto de slider, cursor) já vem convertida.
   - Cada tela de menu em game.py chama `register_hit_areas([...])` com os
     retângulos (pygame.Rect) de cada item, na ORDEM em que aparecem na
     tela, logo depois de desenhá-los. Isso é o que permite ao mouse saber
@@ -47,6 +50,20 @@ class MenuInput:
         self._prev_gamepad_confirm = False
         self._prev_gamepad_back = False
         self._cursor_visible = True
+        # --- extras usados pelo menu de configurações (sliders, cliques em controles, ←/→ com repetição)
+        self.pos_transform = None          # callable(pos_janela) -> pos_lógica (DisplayManager.to_logical)
+        self.mouse_moved = False
+        self.mouse_down = False            # botão esquerdo segurado agora (arrastar slider)
+        self.click_pos = None              # posição do clique esquerdo NESTE quadro (None = sem clique)
+        self.right_clicked = False         # clique direito neste quadro (não inclui o botão B do controle)
+        self._nav_pulse = 0
+        self._nav_h_pulse = 0
+        self._axis_h_dir = 0
+        self._axis_h_timer = 0.0
+
+    @property
+    def mouse_pos(self):
+        return self._mouse_pos
 
     def reset_hover(self):
         """Chamado ao entrar numa tela de menu nova, para não herdar o hover da tela anterior."""
@@ -55,22 +72,34 @@ class MenuInput:
         self._extra_hit_areas = []
         self._axis_dir = 0
         self._axis_timer = 0.0
+        self._axis_h_dir = 0
+        self._axis_h_timer = 0.0
 
     # ------------------------------------------------------------ atualização por quadro
     def update(self, dt):
         self.confirm_clicked = False
         self.back_clicked = False
+        self.click_pos = None
+        self.right_clicked = False
         self._update_mouse()
         self._update_gamepad_and_keyboard_nav(dt)
 
     def _update_mouse(self):
         pos = pygame.mouse.get_pos()
+        if self.pos_transform is not None:
+            pos = self.pos_transform(pos)
         self._mouse_moved_this_frame = pos != self._mouse_pos
+        self.mouse_moved = self._mouse_moved_this_frame
         self._mouse_pos = pos
         buttons = pygame.mouse.get_pressed(num_buttons=3)
+        self.mouse_down = bool(buttons[0])
         left_click = buttons[0] and not self._prev_mouse_buttons[0]
         right_click = buttons[2] and not self._prev_mouse_buttons[2]
         self._prev_mouse_buttons = buttons
+        if left_click:
+            self.click_pos = pos
+        if right_click:
+            self.right_clicked = True
         if self._mouse_moved_this_frame:
             self._cursor_visible = True
             self.hovered_index = self._hit_test(pos)
@@ -149,6 +178,43 @@ class MenuInput:
         self._prev_gamepad_back = back_now
         if direction != 0:
             self._cursor_visible = False     # navegando por teclado/controle: some com o cursor do mouse
+        self._update_horizontal_nav(dt)
+
+    def _update_horizontal_nav(self, dt):
+        """←/→ (teclado), analógico/D-pad (controle) com a mesma repetição do vertical: ajusta sliders/seletores."""
+        direction = 0
+        if "global_right" in self.input.held:
+            direction = 1
+        elif "global_left" in self.input.held:
+            direction = -1
+        if direction == 0:
+            gp = self.input.gamepad
+            for i in range(gp.count):
+                if not gp.is_connected(i):
+                    continue
+                dx, _ = gp.axis_dir(i, deadzone=S.JOYSTICK_DEADZONE)
+                if dx != 0:
+                    direction = dx
+                    break
+        self._nav_h_pulse = 0
+        if direction == 0:
+            self._axis_h_dir = 0
+            self._axis_h_timer = 0.0
+        elif direction != self._axis_h_dir:
+            self._axis_h_dir = direction
+            self._axis_h_timer = S.MENU_AXIS_REPEAT_DELAY
+            self._nav_h_pulse = direction
+        else:
+            self._axis_h_timer -= dt
+            if self._axis_h_timer <= 0:
+                self._axis_h_timer = S.MENU_AXIS_REPEAT_RATE * 0.5      # sliders respondem mais rápido
+                self._nav_h_pulse = direction
+        if direction != 0:
+            self._cursor_visible = False
+
+    def nav_delta_h(self):
+        """-1 / 0 / +1 horizontal, já com repetição (segurar ← ou → muda o slider continuamente)."""
+        return self._nav_h_pulse
 
     def nav_delta(self):
         """-1 (subir) / 0 (nada) / +1 (descer) — já com a repetição aplicada. Também

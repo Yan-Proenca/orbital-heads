@@ -8,7 +8,8 @@ main.py — ponto de entrada do ORBITAL HEADS (versão Pygame).
 
 Responsabilidades deste arquivo, e só deste arquivo:
   - inicializar o pygame (vídeo, mixer, joystick);
-  - abrir a janela e manter o loop principal a 60 FPS com delta time;
+  - carregar o config.json (config.py) e abrir a janela na resolução/modo salvos (display.py);
+  - manter o loop principal a 60 FPS com delta time;
   - repassar eventos do SO para o InputManager;
   - chamar Game.step(dt) e Game.draw(surface) a cada quadro.
 
@@ -20,6 +21,8 @@ import sys
 import pygame
 
 import settings as S
+from config import ConfigManager
+from display import DisplayManager
 from game import Game
 
 
@@ -30,8 +33,13 @@ def main(argv=None):
     pygame.init()                      # inicializa vídeo, eventos, etc. (mixer é feito à parte em AudioManager)
     pygame.joystick.init()
 
-    flags = pygame.FULLSCREEN if fullscreen else 0
-    screen = pygame.display.set_mode((S.WIDTH, S.HEIGHT), flags)
+    # Configurações salvas: nunca impedem o jogo de abrir (arquivo ausente/inválido => padrões).
+    config = ConfigManager().load()
+    video = config.video
+    # O jogo desenha sempre em 1280x720 lógicos; DisplayManager escala para a resolução escolhida (sem distorcer)
+    # e cai para um modo seguro se a resolução salva não existir neste monitor. --fullscreen vale só nesta execução.
+    display = DisplayManager()
+    display.apply((video["width"], video["height"]), fullscreen or video["fullscreen"])
     pygame.display.set_caption("ORBITAL HEADS - 2 jogadores")
     # O cursor do SO fica oculto; MenuInput desenha seu próprio cursor nas
     # telas de menu (título, dificuldade, pausa), e nenhum cursor aparece
@@ -39,7 +47,7 @@ def main(argv=None):
     pygame.mouse.set_visible(False)
 
     clock = pygame.time.Clock()
-    game = Game(screen)
+    game = Game(display.canvas, display=display, config=config)
 
     running = True
     while running:
@@ -66,12 +74,13 @@ def main(argv=None):
             # um erro isolado não deve derrubar a partida inteira em produção;
             # durante o desenvolvimento, prefira deixar a exceção propagar.
 
-        game.draw(screen)
-        pygame.display.flip()
+        game.draw(display.canvas)
+        display.present()
 
         if not game.running:
             running = False
 
+    config.save()                      # só grava se algo mudou desde a última gravação
     pygame.quit()
     return 0
 

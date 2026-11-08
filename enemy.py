@@ -647,27 +647,47 @@ class FinalBoss(Boss):
 
 # ---------------------------------------------------------------- carro cibernético e jatos
 class CyberCar(Enemy):
-    """Rounds 7/8. Só é destruído por 2 aterrissagens de pulo no teto."""
+    """Rounds 7/8 (e o modo Crazy Car). Só é destruído por N aterrissagens de pulo no teto."""
     solo = True
     breachable = False
     shootable = False
 
-    def __init__(self, wave, x, speed, turbo=False):
+    @staticmethod
+    def spawn_x():
+        """Posição x de nascimento do carro: sempre perto da borda configurada em
+        S.CRAZY_CAR_SPAWN_SIDE (hoje 'right'), respeitando a largura do próprio carro e a
+        margem da arena — usada no Clássico, 50 Rounds e Crazy Car, nunca o centro da tela."""
+        w = S.ENEMY_TYPES["car"]["w"]
+        half = w / 2 + S.CRAZY_CAR_SPAWN_MARGIN
+        if S.CRAZY_CAR_SPAWN_SIDE == "left":
+            return half
+        return S.WIDTH - half
+
+    def __init__(self, wave, x=None, speed=S.CAR["speed"], turbo=False, impacts=None):
         cfg = S.ENEMY_TYPES["car"]
-        super().__init__(None, "car", x, S.GROUND_Y - cfg["h"] / 2, S.CAR["impacts"], 0.0)
+        x = self.spawn_x() if x is None else x
+        impacts = S.CAR["impacts"] if impacts is None else impacts
+        super().__init__(None, "car", x, S.GROUND_Y - cfg["h"] / 2, impacts, 0.0)
         self.wave, self.game = wave, wave.game
         self.entry = 0.0
         self.y = S.GROUND_Y - self.h / 2
         self.speed = speed
-        self.dir = random.choice((-1, 1))
-        self.impacts_max = S.CAR["impacts"]
-        self.impacts_left = S.CAR["impacts"]
+        # Nasce voltado para o centro da arena (lado direito -> anda para a esquerda primeiro).
+        self.dir = -1 if x >= S.WIDTH / 2 else 1
+        self.impacts_max = impacts
+        self.impacts_left = impacts
         self.stomp_lock = 0.0
         self.turbo = turbo
         self.turbo_on = False
         self.turbo_t = random.uniform(*S.CAR["turbo_every"])
         self.spark_t = 0.0
         self.smoke_t = 0.0
+        # Phasing/cooldown de dano por contato (ver 8.3 do design doc), chaveado por idx de jogador.
+        # Vazio = comportamento clássico (jogador fica em pé sobre o carro). Só é usado pelo modo
+        # Crazy Car (ver game_modes.py), que ativa isso explicitamente — Clássico/50 Rounds não mudam.
+        self.phasing_enabled = False
+        self._phase_until = {}      # idx -> tempo (game.match_time) em que o phasing daquele jogador acaba
+        self._damage_cd_until = {}  # idx -> tempo em que o carro volta a poder causar dano de contato nele
         self.hb = self._calc_hb()
 
     @property
@@ -724,11 +744,40 @@ class CyberCar(Enemy):
         g.fx.sparks(p.x, self.top, "#ffe14d", 8, up=True)
         g.fx.popup(self.x, self.top - 40, "IMPACTO!", "#ffe14d", 20)
         g.shake(0.2, 5)
+        if self.phasing_enabled:
+            self._start_phasing(p)
         if self.impacts_left <= 0:
             self.alive = False
             return True
-        self.speed *= 1.25
+        if not self.phasing_enabled:
+            # Acelerão de "fuga" a cada impacto sobrevivido: comportamento original do Clássico/50 Rounds.
+            # No Crazy Car (phasing_enabled=True) a velocidade é inteiramente progressão POR NÍVEL — ver
+            # CrazyCarMode._speed_for_level, aplicada uma vez ao nascer o carro de cada nível — então este
+            # acelerão por impacto fica desligado lá para não adiantar o teto de velocidade dentro do
+            # próprio nível (o carro ficaria "rápido demais, cedo demais" se os dois sistemas somassem).
+            self.speed *= 1.25
         return False
+
+    # ------------------------------------------------------------ Phasing (Crazy Car, ver 8.3 do design doc)
+    def _start_phasing(self, p):
+        """Ativa, só para este jogador, o período em que ele atravessa o carro sem ser carregado por
+        ele e sem tomar dano de contato. Respeita o próprio cooldown: um acionamento em sequência
+        (múltiplos quadros sobrepostos) não reinicia o temporizador indefinidamente."""
+        now = self.game.match_time
+        self._phase_until[p.idx] = now + S.CRAZY_CAR_PLAYER_PHASING_DURATION
+        self._damage_cd_until[p.idx] = now + S.CRAZY_CAR_PLAYER_DAMAGE_COOLDOWN
+
+    def is_phasing(self, p):
+        """True enquanto o jogador `p` deve atravessar o carro (sem apoio, sem ser transportado)."""
+        if not self.phasing_enabled:
+            return False
+        return self.game.match_time < self._phase_until.get(p.idx, -1.0)
+
+    def damage_on_cooldown(self, p):
+        """True enquanto o carro não pode causar dano de CONTATO a `p` (outras fontes de dano não são afetadas)."""
+        if not self.phasing_enabled:
+            return False
+        return self.game.match_time < self._damage_cd_until.get(p.idx, -1.0)
 
     def _draw_extra(self, surf):
         x, y = int(self.x), int(self.y)

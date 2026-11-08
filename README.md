@@ -18,6 +18,10 @@ orbital_heads/
 ├── input_handler.py    # InputManager: unifica teclado + joystick (USB/Bluetooth) por jogador
 ├── utils.py             # clamp/approach/overlap/mult_clamp — portados sem alteração
 ├── hazards.py          # (rodada 4) Black Saws, Rockets, Ball Pod, Bouncing Spheres + máquina de fases
+├── settings_menu.py    # (rodada 5) menu de configurações: áudio/vídeo/controles
+├── display.py          # (rodada 5) janela, resolução, tela cheia, escala letterbox, mouse lógico
+├── config.py           # (rodada 5) config.json: volumes, vídeo e atalhos por jogador/dispositivo
+├── selftest_settings.py# (rodada 5) testes automáticos headless do menu de configurações
 ├── selftest_hazards.py # (rodada 4) testes automáticos headless: python selftest_hazards.py
 ├── requirements.txt
 └── assets/
@@ -96,7 +100,7 @@ self.game.audio.on_pickup("boost", good=True)
 Em `game.py`, o estado `"paused"` desenha e navega por `PAUSE_ITEMS`:
 
 ```python
-PAUSE_ITEMS = ("resume", "restart", "music", "keybinds", "main_menu")
+PAUSE_ITEMS = ("resume", "restart", "music", "settings", "main_menu", "quit")   # rodada 5: "keybinds" virou "settings"
 ```
 
 - **Resumir**: volta para `"playing"`.
@@ -293,7 +297,7 @@ encerra e o processo fecha normalmente. Navegável por teclado, mouse
 (hover + clique) e controle (Xbox/PlayStation/Switch), como qualquer outro
 item desses menus.
 
-### 4) Tela de configuração de controles (estilo AAA)
+### 4) Tela de configuração de controles (estilo AAA) — substituída na rodada 5 pela aba CONTROLES do menu de configurações
 Reescrita como `Game._draw_keybinds_screen` / `_update_keybinds_menu`,
 inspirada no layout de referência (abas no topo, nome da ação à esquerda,
 caixa arredondada com a tecla à direita):
@@ -508,6 +512,70 @@ na mesma passada/grade espacial dos inimigos (`shots_vs_enemies`).
 vida, regras de doação (1-4 jogadores, vários mortos, mesmo quadro, posição segura), ordem das fases nos rounds 1-9,
 separação combate × fases, física de cada hazard, contato/dano único, pausa, morte de jogador no meio da fase,
 modo infinito, 4 dificuldades, boosts globais, reinício no meio de uma fase, partida completa de 10 rounds e desempenho.
+
+## Rodada 5: menu avançado de configurações (áudio, vídeo e controles) + config.json
+
+**Onde abrir:** `CONFIGURAÇÕES` no menu inicial *e* no menu de pausa (no lugar de "CONFIGURAR CONTROLES"). A tela
+antiga de atalhos foi absorvida pela aba CONTROLES — não existem dois sistemas. O toggle `MÚSICA: LIGADA/DESLIGADA`
+da pausa continua existindo.
+
+**Navegação:** barra lateral `ÁUDIO / VÍDEO · CONTROLES · VOLTAR`. Teclado: `↑/↓` escolhe, `ENTER` ou `→` entra, `←/→`
+ajusta sliders/seletores, `ESC` volta (na barra lateral, fecha). Controle: direcional/analógico, `A` confirma, `B` volta.
+Mouse: passar o cursor, clicar, **arrastar sliders**, clicar nas setas/segmentos/checkbox; clique direito volta.
+
+### Áudio / Vídeo
+- **Volume da música e dos efeitos** (0-100%, passo de 5% no teclado/controle, contínuo no mouse): independentes e
+  aplicados na hora ao `AudioManager` existente (`set_music_volume` / `set_sfx_volume`). 0% silencia de verdade
+  (efeitos com 0% nem ocupam canal do mixer). Ao arrastar o slider de efeitos toca-se um tiro de amostra.
+- **Resolução:** seletor com só o que o monitor suporta (`DisplayManager.available_resolutions`: candidatas de
+  `RESOLUTION_CANDIDATES` ∩ tamanho do desktop ∩ `pygame.display.list_modes()` em tela cheia, + modos 16:9 extras).
+  Selecionar deixa **PENDENTE**; `APLICAR RESOLUÇÃO` (ou ENTER na linha) aplica. Pedido impossível cai na resolução
+  suportada mais próxima, com aviso.
+- **Tela cheia:** checkbox que aplica na hora, preservando a resolução escolhida. `F11` (em qualquer tela) e `F`
+  (durante a partida) também alternam. A partida **não reinicia**: só a janela é recriada.
+- **Como a escala funciona:** o jogo continua desenhando em 1280×720 lógicos e `display.py` escala para a janela,
+  com barras pretas se a proporção não for 16:9 (nunca estica; posições relativas idênticas em qualquer resolução).
+  O mouse é convertido para coordenadas lógicas. Escalas não inteiras usam `smoothscale` (~6 ms em 1080p); se o FPS
+  cair (`perf_level`), o jogo troca para `scale` (~2 ms).
+
+### Controles
+- Escolha **jogador** (P1-P4, sempre os 4) × **dispositivo a editar** (`TECLADO · XBOX · PLAYSTATION`). Cada jogador
+  tem 3 perfis independentes. A linha `CONTROLE` associa/desassocia um controle ao jogador; ao trocar de jogador o
+  dispositivo abre no perfil do controle conectado a ele.
+- **Perfis Xbox/PlayStation:** os botões são guardados por *posição* (`a` = baixo, `b` = direita, `x` = esquerda,
+  `y` = cima, `lb`, `rb`, `back`) e exibidos com a identidade de cada família (letras coloridas no Xbox; ✕ ○ □ △
+  desenhados no PlayStation; `LB/RB` vs `L1/R1`). Em jogo vale o perfil da família do controle conectado
+  (`input_handler.pad_device_for`): PlayStation usa o perfil `playstation`; Xbox, Switch e genéricos usam `xbox`.
+- **Remapear:** selecione a ação e `ENTER`/clique → `PRESSIONE O NOVO BOTÃO` (ou `A NOVA TECLA`). Cancelar: `ESC`,
+  `START`, clique direito, botão CANCELAR ou 10 s sem entrada. A tecla/botão capturado não vaza para o menu nem para o jogo.
+- **Regras:** `ESC`, `F` e `F11` (teclado) e `START` (controle) são reservados. Comando já usado por **outra ação do
+  mesmo jogador** → pede confirmação e **troca** os dois (ninguém fica sem comando). Tecla usada por **outro jogador**
+  → recusada com o aviso de quem a usa (nunca altera os controles dos demais). Movimento no controle é fixo no
+  direcional/analógico esquerdo. Itens alterados exibem `PERSONALIZADO`.
+- **RESTAURAR PADRÕES:** pede confirmação e restaura só o *jogador + dispositivo* selecionados. Se um padrão de
+  teclado colidir com a tecla personalizada de outro jogador, nada é alterado e o aviso diz com quem colide.
+- **Desconexão:** o controle some → o jogador volta ao teclado, captura em andamento é cancelada, nada quebra;
+  reconectar reassocia.
+
+### Persistência (`config.json`, ao lado de `main.py`; `ORBITAL_CONFIG=/caminho.json` muda o local)
+```json
+{ "version": 1,
+  "audio": {"music_volume": 50, "sfx_volume": 80},
+  "video": {"width": 1280, "height": 720, "fullscreen": false},
+  "controls": {"1": {"keyboard": {"left": "a", "...": "..."}, "xbox": {"jump": "a", "...": "..."}, "playstation": {"...": "..."}}} }
+```
+Lido ao iniciar e aplicado (volumes, resolução/tela cheia, atalhos). Ausente → criado com padrões. JSON inválido →
+padrões, jogo abre normalmente e o arquivo ruim só é substituído (com cópia `.bak`) quando você mudar algo. Incompleto
+ou com valores inválidos → aproveita o que é válido. Só grava quando algo muda (comparação com o último conteúdo) e de
+forma atômica. Atalhos adulterados (tecla inexistente/reservada/repetida) são ignorados e valem os padrões.
+`python main.py --fullscreen` força tela cheia só naquela execução.
+
+### Testes desta rodada
+`python selftest_settings.py` (headless; controles Xbox/PlayStation e mouse são simulados): persistência (criar,
+inválido, incompleto, só grava se mudou), volumes independentes/0%/mouse/teclado, resoluções por monitor, escala e
+conversão do mouse, aplicar vídeo sem reiniciar a partida, remapeamento de teclado/Xbox/PlayStation, conflitos,
+reservadas, restaurar por dispositivo, desconexão, vazamento da tecla capturada, navegação, 1-4 jogadores e `main.py`
+real em subprocesso. `python selftest_hazards.py` (rodada 4) continua passando.
 
 ## Próximos passos sugeridos (polimento, não funcionalidade)
 

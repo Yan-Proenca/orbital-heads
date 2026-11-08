@@ -14,7 +14,7 @@ ou com um controle Xbox/PlayStation conectado por Bluetooth.
 import pygame
 
 import settings as S
-from gamepad import GamepadManager
+from gamepad import GamepadManager, PLAYSTATION
 
 # nome da tecla (string, como em settings.PLAYER_DEFS) -> constante pygame
 _KEYMAP = {
@@ -46,6 +46,8 @@ def _resolve_key(name):
     pressionar, não só as pré-cadastradas em _KEYMAP."""
     if name in _KEYMAP:
         return _KEYMAP[name]
+    if isinstance(name, str) and name.startswith("#") and name[1:].isdigit():
+        return int(name[1:])            # tecla sem nome reconhecível: gravada como "#<codigo>"
     try:
         return pygame.key.key_code(name)
     except (ValueError, pygame.error):
@@ -76,16 +78,35 @@ def display_label(name):
         return special[name]
     if name.startswith("kp") and name[2:].isdigit():
         return f"NUM {name[2:]}"
+    if len(name) == 3 and name[0] == "[" and name[2] == "]":      # teclado numérico: pygame chama de "[+]", "[-]"...
+        return f"NUM {name[1]}"
     if len(name) == 1:
         return name.upper()
     return name.upper()
 
 
+def default_pad_map():
+    """Botões padrão do controle (nomes por POSIÇÃO no padrão Xbox: a = baixo, b = direita, x = esquerda, y = cima)."""
+    return {action: S.GAMEPAD_BUTTONS[action] for action in S.PAD_ACTIONS}
+
+
+def pad_device_for(family):
+    """Perfil de botões usado por uma família de controle: PlayStation tem o seu, o resto (Xbox, Switch,
+    genérico) usa o perfil 'xbox' — os botões são mapeados por posição, só os rótulos mudam."""
+    return "playstation" if family == PLAYSTATION else "xbox"
+
+
+def reserved_key_codes():
+    return {_resolve_key(n) for n in S.RESERVED_KEYS}
+
+
 class PlayerBinding:
-    """Mapeamento de ações lógicas (left/right/jump/dash/fire) para teclado + joystick de UM jogador."""
+    """Mapeamento de ações lógicas (left/right/jump/dash/fire/donate_life) de UM jogador:
+    teclado (key_codes) e, para cada perfil de controle (xbox/playstation), pad_buttons[perfil][ação] = botão."""
 
     def __init__(self, key_names, gamepad_slot=None):
         self.key_codes = {action: _resolve_key(name) for action, name in key_names.items()}
+        self.pad_buttons = {dev: default_pad_map() for dev in S.PAD_DEVICES}
         self.gamepad_slot = gamepad_slot   # None = sem controle atribuído a este jogador; senão, vaga do GamepadManager
 
 
@@ -210,7 +231,7 @@ class InputManager:
                     new_held.add(prefix + action)
             # --- controle, se atribuído
             if binding.gamepad_slot is not None and self.gamepad.is_connected(binding.gamepad_slot):
-                self._poll_gamepad(binding.gamepad_slot, prefix, new_held)
+                self._poll_gamepad(binding.gamepad_slot, prefix, new_held, binding)
 
         # --- teclas globais (não específicas de jogador): pausa, reiniciar, etc.
         for name, code in (("escape", pygame.K_ESCAPE), ("r", pygame.K_r), ("m", pygame.K_m),
@@ -233,22 +254,21 @@ class InputManager:
         self.pressed |= (new_held - self.held)     # edge-trigger: entrou em held agora
         self.held = new_held
 
-    def _poll_gamepad(self, slot, prefix, new_held):
+    def _poll_gamepad(self, slot, prefix, new_held, binding=None):
         dx, dy = self.gamepad.axis_dir(slot, deadzone=S.JOYSTICK_DEADZONE)
         if dx < 0:
             new_held.add(prefix + "left")
         elif dx > 0:
             new_held.add(prefix + "right")
 
-        btn = S.GAMEPAD_BUTTONS
-        if self.gamepad.button_down(slot, btn["jump"]):
-            new_held.add(prefix + "jump")
-        if self.gamepad.button_down(slot, btn["dash"]):
-            new_held.add(prefix + "dash")
-        if self.gamepad.button_down(slot, btn["fire"]):
-            new_held.add(prefix + "fire")
-        if self.gamepad.button_down(slot, btn["donate_life"]):
-            new_held.add(prefix + "donate_life")
+        # botões: perfil de botões do jogador para a família do controle conectado (Xbox x PlayStation)
+        if binding is not None:
+            buttons = binding.pad_buttons[pad_device_for(self.gamepad.family(slot))]
+        else:
+            buttons = default_pad_map()
+        for action, button in buttons.items():
+            if self.gamepad.button_down(slot, button):
+                new_held.add(prefix + action)
 
     def take_pressed(self):
         p = self.pressed
@@ -272,3 +292,180 @@ class InputManager:
         if code is None:
             return "—"
         return display_label(key_name_for_rebind(code))
+
+    # ------------------------------------------------------------ remapeamento por jogador e dispositivo
+    # device: "keyboard" | "xbox" | "playstation". Valores: keycode (teclado) ou nome de botão ("a", "lb"...).
+    def binding_value(self, player_idx, device, action):
+        b = self.bindings[player_idx]
+        return b.key_codes.get(action) if device == "keyboard" else b.pad_buttons[device].get(action)
+
+    def default_value(self, player_idx, device, action):
+        if device == "keyboard":
+            return _resolve_key(S.PLAYER_DEFS[player_idx]["key_names"][action])
+        return default_pad_map().get(action)
+
+    def is_customized(self, player_idx, device, action):
+        return self.binding_value(player_idx, device, action) != self.default_value(player_idx, device, action)
+
+    def is_bindable(self, device, value):
+        """(ok, motivo): o valor pode ser atribuído a uma ação? Teclas reservadas e o botão START não podem."""
+        if device == "keyboard":
+            if value in reserved_key_codes():
+                return False, "TECLA RESERVADA (" + key_name_for_rebind(value).upper() + ")"
+            return True, ""
+        if value == "start":
+            return False, "START É RESERVADO PARA PAUSAR"
+        if value not in S.PAD_BINDABLE:
+            return False, "BOTÃO NÃO SUPORTADO"
+        return True, ""
+
+    def find_conflict(self, player_idx, device, action, value):
+        """None se livre; ('self', outra_ação) se o MESMO jogador já usa o valor nesse dispositivo;
+        ('player', outro_jogador, outra_ação) se OUTRO jogador usa a mesma tecla (só teclado)."""
+        b = self.bindings[player_idx]
+        table = b.key_codes if device == "keyboard" else b.pad_buttons[device]
+        for other, v in table.items():
+            if other != action and v == value:
+                return ("self", other)
+        if device == "keyboard":
+            for i, ob in enumerate(self.bindings):
+                if i != player_idx:
+                    for other, v in ob.key_codes.items():
+                        if v == value:
+                            return ("player", i, other)
+        return None
+
+    def set_binding(self, player_idx, device, action, value):
+        """Atribui sem checar conflito (quem chama decide: trocar, recusar...). Levanta ValueError se inválido."""
+        ok, why = self.is_bindable(device, value)
+        if not ok:
+            raise ValueError(why)
+        b = self.bindings[player_idx]
+        if device == "keyboard":
+            if action not in b.key_codes:
+                raise ValueError("ação desconhecida: " + action)
+            b.key_codes[action] = value
+        else:
+            if action not in S.PAD_ACTIONS:
+                raise ValueError("ação fixa/desconhecida: " + action)
+            b.pad_buttons[device][action] = value
+
+    def swap_bindings(self, player_idx, device, action_a, action_b):
+        """Troca os valores de duas ações do mesmo jogador/dispositivo (ninguém fica sem comando)."""
+        b = self.bindings[player_idx]
+        table = b.key_codes if device == "keyboard" else b.pad_buttons[device]
+        table[action_a], table[action_b] = table[action_b], table[action_a]
+
+    def rebind_pad(self, player_idx, device, action, button):
+        self.set_binding(player_idx, device, action, button)
+
+    def reset_device(self, player_idx, device):
+        """Restaura os padrões de UM jogador em UM dispositivo (os outros ficam como estão). Se algum padrão
+        de teclado colidir com a tecla personalizada de OUTRO jogador, não altera nada e devolve a lista de
+        conflitos [(ação, outro_jogador, outra_ação)]; lista vazia = restaurado."""
+        b = self.bindings[player_idx]
+        if device == "keyboard":
+            defaults = {a: _resolve_key(n) for a, n in S.PLAYER_DEFS[player_idx]["key_names"].items()}
+            clashes = []
+            for action, code in defaults.items():
+                for i, ob in enumerate(self.bindings):
+                    if i != player_idx:
+                        for other, v in ob.key_codes.items():
+                            if v == code:
+                                clashes.append((action, i, other))
+            if clashes:
+                return clashes
+            b.key_codes = defaults
+        else:
+            b.pad_buttons[device] = default_pad_map()
+        return []
+
+    # ------------------------------------------------------------ persistência (config.json)
+    @staticmethod
+    def _key_export_name(code):
+        name = key_name_for_rebind(code)
+        try:
+            if _resolve_key(name) == code:
+                return name
+        except ValueError:
+            pass
+        return "#%d" % code                    # sem nome estável: grava o código
+
+    def export_bindings(self):
+        out = {}
+        for i, b in enumerate(self.bindings):
+            out[str(i + 1)] = {
+                "keyboard": {a: self._key_export_name(c) for a, c in b.key_codes.items()},
+                **{dev: dict(b.pad_buttons[dev]) for dev in S.PAD_DEVICES},
+            }
+        return out
+
+    def import_bindings(self, data):
+        """Aplica atalhos vindos do config.json. Tudo é validado: nome de tecla desconhecido, tecla reservada,
+        botão inexistente, ação repetida ou tecla dividida entre jogadores são IGNORADOS (valem os padrões).
+        Devolve a lista de avisos (vazia = tudo aproveitado)."""
+        warns = []
+        if not isinstance(data, dict):
+            return warns
+        reserved = reserved_key_codes()
+        for i, b in enumerate(self.bindings):
+            pd = data.get(str(i + 1))
+            if not isinstance(pd, dict):
+                continue
+            tag = f"P{i + 1}"
+            kb = pd.get("keyboard")
+            if isinstance(kb, dict):
+                new = dict(b.key_codes)
+                for action, name in kb.items():
+                    if action not in new:
+                        warns.append(f"{tag} teclado: ação desconhecida '{action}'")
+                        continue
+                    try:
+                        code = _resolve_key(name)
+                    except ValueError:
+                        warns.append(f"{tag} teclado: tecla desconhecida '{name}'")
+                        continue
+                    if code in reserved:
+                        warns.append(f"{tag} teclado: tecla reservada '{name}'")
+                        continue
+                    new[action] = code
+                if len(set(new.values())) != len(new):
+                    warns.append(f"{tag} teclado: teclas repetidas, usando padrão")
+                else:
+                    b.key_codes = new
+            for dev in S.PAD_DEVICES:
+                pm = pd.get(dev)
+                if not isinstance(pm, dict):
+                    continue
+                new = dict(b.pad_buttons[dev])
+                for action, button in pm.items():
+                    if action in S.PAD_ACTIONS and button in S.PAD_BINDABLE:
+                        new[action] = button
+                    else:
+                        warns.append(f"{tag} {dev}: '{action}={button}' ignorado")
+                if len(set(new.values())) != len(new):
+                    warns.append(f"{tag} {dev}: botões repetidos, usando padrão")
+                else:
+                    b.pad_buttons[dev] = new
+        self._resolve_cross_conflicts(warns)
+        for w in warns:
+            print("[config] controles:", w)
+        return warns
+
+    def _resolve_cross_conflicts(self, warns):
+        """Duas pessoas nunca podem dividir a mesma tecla: se um config editado à mão causar isso, o jogador de
+        número maior volta ao teclado padrão (e o outro também, se o padrão ainda colidir)."""
+        n = len(self.bindings)
+        for _ in range(n):
+            clean = True
+            for i in range(n):
+                for j in range(i + 1, n):
+                    if set(self.bindings[i].key_codes.values()) & set(self.bindings[j].key_codes.values()):
+                        clean = False
+                        for k in (j, i):
+                            self.bindings[k].key_codes = {a: _resolve_key(nm) for a, nm in S.PLAYER_DEFS[k]["key_names"].items()}
+                            warns.append(f"P{k + 1} teclado: tecla dividida com outro jogador, usando padrão")
+                            if not set(self.bindings[i].key_codes.values()) & set(self.bindings[j].key_codes.values()):
+                                break
+            if clean:
+                break

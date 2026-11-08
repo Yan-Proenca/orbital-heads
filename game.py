@@ -1,12 +1,13 @@
 """
 game.py — estado central do jogo: states (title/setup/playing/paused/
-keybinds/gameover/mvp), o "step" de um quadro, ligação entre todos os
+settings/gameover/mvp), o "step" de um quadro, ligação entre todos os
 sistemas (ondas, colisões, efeitos, áudio, input) e os menus, navegáveis
 por teclado, mouse E controle (Xbox/PlayStation/Switch/genérico).
 
 Fluxo de estados:
     title -> setup (modo de jogo -> dificuldade -> nº de jogadores) -> playing
-    playing <-> paused -> keybinds (config. de controles) -> volta a paused
+    playing <-> paused -> settings (áudio/vídeo/controles, ver settings_menu.py) -> volta a paused
+    title -> settings -> volta a title
     playing -> gameover -> mvp (estatísticas) -> setup ou title
 Tanto "paused" quanto "title" têm a opção SAIR DO JOGO (encerra o processo).
 """
@@ -17,34 +18,37 @@ import pygame
 
 import settings as S
 from audio import AudioManager
-from input_handler import InputManager, key_name_for_rebind, display_label
+from input_handler import InputManager
+from config import ConfigManager
+from settings_menu import SettingsMenu
 from player import Player
 from projectile import Projectile
 from pickup import Pickup
 from effects import Effects
 from wave import WaveManager
 from collisions import CollisionManager
+from game_modes import make_mode_runner
 from utils import clamp, circle_hits_rect, mult_clamp, get_font, draw_heart
 from menu_input import MenuInput
 from background import CityBackground
 import gamepad as GP
 
 # ----------------------------------------------------------------- menu de pausa
-PAUSE_ITEMS = ("resume", "restart", "music", "keybinds", "main_menu", "quit")
+PAUSE_ITEMS = ("resume", "restart", "music", "settings", "main_menu", "quit")
 PAUSE_LABELS = {
     "resume": "RESUMIR",
     "restart": "REINICIAR PARTIDA",
     "music": "MÚSICA: {state}",
-    "keybinds": "CONFIGURAR CONTROLES",
+    "settings": "CONFIGURAÇÕES",
     "main_menu": "MENU INICIAL",
     "quit": "SAIR DO JOGO",
 }
-TITLE_ITEMS = ("start", "quit")
-TITLE_LABELS = {"start": "INICIAR JOGO", "quit": "SAIR DO JOGO"}
+TITLE_ITEMS = ("start", "settings", "quit")
+TITLE_LABELS = {"start": "INICIAR JOGO", "settings": "CONFIGURAÇÕES", "quit": "SAIR DO JOGO"}
 
-REBIND_ACTIONS = ("left", "right", "jump", "dash", "fire", "donate_life")
-REBIND_ACTION_LABELS = {"left": "MOVER ESQUERDA", "right": "MOVER DIREITA", "jump": "PULAR",
-                         "dash": "DASH", "fire": "ATIRAR", "donate_life": "DOAR VIDA"}
+# ações remapeáveis e seus nomes agora vivem em settings.py (usadas também por settings_menu.py)
+REBIND_ACTIONS = S.CONTROL_ACTIONS
+REBIND_ACTION_LABELS = S.CONTROL_LABELS
 
 # ----------------------------------------------------------------- menu de configuração de partida
 SETUP_STEPS = ("mode", "difficulty", "players")
@@ -52,13 +56,23 @@ SETUP_TITLES = {"mode": "MODO DE JOGO", "difficulty": "DIFICULDADE", "players": 
 
 
 class Game:
-    def __init__(self, screen):
+    def __init__(self, screen, display=None, config=None):
+        """screen = tela lógica 1280x720 onde o jogo desenha; display = DisplayManager (resolução/tela cheia,
+        None em testes sem janela); config = ConfigManager já carregado (None = padrões, sem arquivo)."""
         self.screen = screen
+        self.display = display
+        self.config = config if config is not None else ConfigManager(path=None)
         self.audio = AudioManager()
         self.audio.init_mixer()
         self.audio.load_all()
+        self.audio.set_music_volume(self.config.music_volume / 100.0)       # volumes salvos
+        self.audio.set_sfx_volume(self.config.sfx_volume / 100.0)
         self.input = InputManager()
+        self.input.import_bindings(self.config.controls)                    # atalhos salvos (validados)
         self.menu = MenuInput(self.input)
+        if display is not None:
+            self.menu.pos_transform = display.to_logical                    # mouse da janela -> tela lógica
+        self.settings_menu = SettingsMenu(self)
         self.city = CityBackground()
 
         self.players = []
@@ -66,6 +80,8 @@ class Game:
         self.pickups = []
         self.fx = Effects()
         self.wave = WaveManager(self)
+        self.mode_runner = None    # ModeManager ativo quando game_mode é de sobrevivência (ver game_modes.py)
+        self.mode_record_result = None
 
         # --- escolhas da tela de configuração de partida (item 5 do pedido)
         self.game_mode = S.DEFAULT_GAME_MODE
@@ -84,8 +100,6 @@ class Game:
         self.state = "title"
         self.title_sel = 0
         self.pause_sel = 0
-        self.rebinding = None          # (player_idx, action_index) quando aguardando nova tecla/botão
-        self.keybinds_player = 0       # aba selecionada na tela de configuração de controles
         self.just = set()
         self.rounds_completed = 0
         self.drops_this_round = 0
@@ -137,7 +151,13 @@ class Game:
         self.mvp = None
         self.banner = None
         self.state = "playing"
-        self.wave.begin_round(1)
+        self.mode_runner = None
+        if self.game_mode in S.SURVIVAL_GAME_MODES:
+            # Modos de sobrevivência: self.wave continua existindo (collisions.py/player.py dependem
+            # dele), mas quem decide o que nasce e quando é o ModeManager — não WaveManager.begin_round.
+            self.mode_runner = make_mode_runner(self.game_mode, self)
+        else:
+            self.wave.begin_round(1)
         self.audio.play_music("gameplay")
         self._apply_gamepad_leds()
 
@@ -165,6 +185,27 @@ class Game:
         elif self.state == "paused":
             self.state = "playing"
 
+    # ------------------------------------------------------------ vídeo (resolução / tela cheia)
+    def apply_video(self, size, fullscreen):
+        """Aplica resolução + tela cheia SEM mexer na partida (só recria a janela) e grava no config.json.
+        Devolve o dict de DisplayManager.apply (size, fullscreen, ok, note) ou None se não há DisplayManager."""
+        if self.display is None:
+            return None
+        res = self.display.apply(size, fullscreen)
+        self.config.set_video(res["size"][0], res["size"][1], res["fullscreen"])
+        self.config.save()
+        return res
+
+    def toggle_fullscreen(self):
+        """F11 / F: alterna tela cheia mantendo a resolução escolhida."""
+        if self.display is None:
+            try:
+                pygame.display.toggle_fullscreen()
+            except pygame.error:
+                pass
+            return
+        self.apply_video(self.display.size, not self.display.fullscreen)
+
     def request_quit(self):
         """SAIR DO JOGO: sinaliza para main.py encerrar o loop principal."""
         self.running = False
@@ -184,6 +225,10 @@ class Game:
         self.just = self.input.take_pressed()
         self.menu.update(dt)
         self.city.update(dt)
+        if self.display is not None:                  # sem FPS sobrando, o escalonamento suave é o 1º a sair
+            self.display.smooth = self.perf_level == 0
+        if "global_f11" in self.just and not self.input.text_input_active:
+            self.toggle_fullscreen()
 
         if self.state == "title":
             self.title_t += dt
@@ -196,8 +241,8 @@ class Game:
                 self.update(dt)
         elif self.state == "paused":
             self._update_pause_menu()
-        elif self.state == "keybinds":
-            self._update_keybinds_menu()
+        elif self.state == "settings":
+            self.settings_menu.update(dt)
         elif self.state == "gameover":
             self.gameover_t += dt
             if self.gameover_t > S.GAMEOVER_INPUT_LOCK and self._confirm_pressed():
@@ -215,11 +260,8 @@ class Game:
     def _handle_playing_globals(self):
         if "global_escape" in self.just:
             self.toggle_pause()
-        elif "global_f11" in self.just or "global_f" in self.just:
-            try:
-                pygame.display.toggle_fullscreen()
-            except pygame.error:
-                pass
+        elif "global_f" in self.just:                      # F11 (em qualquer tela) é tratado em step()
+            self.toggle_fullscreen()
 
     # ------------------------------------------------------------ menu de título (item 3: SAIR DO JOGO aqui também)
     def _update_title_menu(self):
@@ -234,6 +276,8 @@ class Game:
             item = TITLE_ITEMS[self.title_sel]
             if item == "start":
                 self.enter_setup()
+            elif item == "settings":
+                self.settings_menu.open(return_to="title")
             elif item == "quit":
                 self.request_quit()
 
@@ -305,8 +349,8 @@ class Game:
             self.restart_match()
         elif item == "music":
             self.audio.toggle_music()
-        elif item == "keybinds":
-            self._enter_keybinds_screen(return_to="paused")
+        elif item == "settings":
+            self.settings_menu.open(return_to="paused")
         elif item == "main_menu":
             self.go_to_title()
         elif item == "quit":
@@ -316,114 +360,6 @@ class Game:
         if item == "music":
             return PAUSE_LABELS[item].format(state="LIGADA" if self.audio.music_enabled else "DESLIGADA")
         return PAUSE_LABELS[item]
-
-    # ------------------------------------------------------------ tela de configuração de controles (item 4)
-    def _enter_keybinds_screen(self, return_to="paused"):
-        self._keybinds_return_to = return_to
-        self.state = "keybinds"
-        self.keybinds_player = 0
-        self.rebinding = None
-        self.menu.reset_hover()
-
-    def _keybinds_action_count(self):
-        return len(REBIND_ACTIONS)
-
-    def _update_keybinds_menu(self):
-        if self.rebinding is not None:
-            self._update_rebind_capture()
-            return
-
-        n_players = max(1, len(self.players) or self.player_count)
-        # --- trocar de aba de jogador: ←/→, ou clicar nas abas (áreas extras registradas no draw)
-        if "global_left" in self.just:
-            self.keybinds_player = (self.keybinds_player - 1) % n_players
-            self.audio.on_menu_move()
-        elif "global_right" in self.just:
-            self.keybinds_player = (self.keybinds_player + 1) % n_players
-            self.audio.on_menu_move()
-
-        nav = self.menu.nav_delta()
-        actions_n = self._keybinds_action_count()
-        total_rows = actions_n + 2   # + "Restaurar Padrões" + "Voltar"
-        if not hasattr(self, "_keybinds_row"):
-            self._keybinds_row = 0
-        if nav:
-            self._keybinds_row = (self._keybinds_row + nav) % total_rows
-            self.audio.on_menu_move()
-        if self.menu.hovered_index is not None:
-            if self.menu.hovered_index < 0:   # abas de jogador usam índices negativos (ver draw)
-                tab = -self.menu.hovered_index - 1
-                if tab != self.keybinds_player:
-                    self.keybinds_player = tab
-                    self.audio.on_menu_move()
-            elif self.menu.hovered_index != self._keybinds_row:
-                self._keybinds_row = self.menu.hovered_index
-
-        if self._back_pressed():
-            self.audio.on_menu_confirm()
-            self.state = self._keybinds_return_to
-            self.menu.reset_hover()
-            return
-
-        if self._confirm_pressed():
-            self.audio.on_menu_confirm()
-            if self._keybinds_row < actions_n:
-                self._start_rebind_capture(self.keybinds_player, self._keybinds_row)
-            elif self._keybinds_row == actions_n:
-                self._reset_player_defaults(self.keybinds_player)
-            else:
-                self.state = self._keybinds_return_to
-                self.menu.reset_hover()
-
-    def _reset_player_defaults(self, player_idx):
-        defaults = S.PLAYER_DEFS[player_idx]["key_names"]
-        for action, key_name in defaults.items():
-            try:
-                self.input.rebind_key(player_idx, action, key_name)
-            except ValueError:
-                pass
-        self.audio.on_menu_confirm()
-
-    def _start_rebind_capture(self, player_idx, act_idx):
-        self.rebinding = (player_idx, act_idx)
-        self.input.text_input_active = True
-        self.input.last_key_pressed = None
-        self.input.last_gamepad_button = None
-
-    def _update_rebind_capture(self):
-        """Tela 'pressione uma tecla OU um botão' para UMA ação; aceita teclado
-        e controle, o que vier primeiro. ESC/B cancela sem alterar nada."""
-        if self._back_pressed():
-            self.rebinding = None
-            self.input.text_input_active = False
-            return
-        p_idx, act_idx = self.rebinding
-        action = REBIND_ACTIONS[act_idx]
-        key = self.input.last_key_pressed
-        gp_hit = self.input.last_gamepad_button
-        if key is not None:
-            name = key_name_for_rebind(key)
-            alias = {"left shift": "shift"}.get(name, name)
-            try:
-                self.input.rebind_key(p_idx, action, alias)
-                self.audio.on_menu_confirm()
-            except ValueError:
-                pass
-            self.input.last_key_pressed = None
-            self.rebinding = None
-            self.input.text_input_active = False
-        elif gp_hit is not None:
-            slot, button_name = gp_hit
-            # mapear controle por ação-por-jogador exigiria um esquema de botões
-            # por jogador (hoje settings.GAMEPAD_BUTTONS é global); por ora,
-            # apertar um botão do controle durante a captura associa aquele
-            # controle inteiro a este jogador (o padrão esperado: "jogador 2,
-            # aperte qualquer botão no SEU controle para usá-lo").
-            self.input.assign_gamepad(p_idx, slot)
-            self.audio.on_menu_confirm()
-            self.input.last_gamepad_button = None
-            self.rebinding = None
-            self.input.text_input_active = False
 
     # ------------------------------------------------------------ tela de MVP / resumo (item 6)
     def _enter_mvp_screen(self):
@@ -451,6 +387,8 @@ class Game:
         self._track_perf(dt)
         self.match_time += dt
         self._update_global_effects(dt)
+        if self.mode_runner is not None:
+            self.mode_runner.update(dt)
         self.wave.update(dt)
         for p in self.players:
             p.update(dt)
@@ -619,8 +557,11 @@ class Game:
             self.area_blast(b.x, S.GROUND_Y - 6 if mode == "ground" else min(b.y, S.GROUND_Y - 4), b.blast)
 
     def on_stomp(self, car, p):
-        if car.stomp(p):
+        """Impacto de pulo válido sobre um CyberCar. Devolve True quando esse impacto destrói o carro."""
+        destroyed = car.stomp(p)
+        if destroyed:
             self.on_enemy_destroyed(car, p)
+        return destroyed
 
     # ------------------------------------------------------------ eventos de jogo
     def on_player_eliminated(self, p):
@@ -842,6 +783,11 @@ class Game:
         self.winner = self.determine_winner()
         self.gameover_t = 0.0
         self.banner = None
+        self.mode_record_result = None     # (is_new_record, valor_do_recorde) — só nos modos de sobrevivência
+        if self.mode_runner is not None:
+            self.mode_runner.ended = True
+            self.mode_record_result = self.mode_runner.on_match_end()
+            self.config.save()
         if victory:
             self.audio.on_victory()
             self.audio.play_music("victory")
@@ -880,6 +826,10 @@ class Game:
         if self.state == "setup":
             self._draw_setup(surf)
             return
+        if self.state == "settings" and self.settings_menu.return_to == "title":
+            self.city.draw(surf)                            # aberto pelo menu inicial: fundo da cidade
+            self.settings_menu.draw(surf)
+            return
 
         self._apply_shake(1 / S.FPS)
         world = surf
@@ -904,8 +854,8 @@ class Game:
 
         if self.state == "paused":
             self._draw_pause_overlay(surf)
-        elif self.state == "keybinds":
-            self._draw_keybinds_screen(surf)
+        elif self.state == "settings":                     # aberto pela pausa: a partida congelada fica atrás
+            self.settings_menu.draw(surf)
         elif self.state == "gameover":
             self._draw_gameover(surf)
         elif self.state == "mvp":
@@ -993,14 +943,25 @@ class Game:
                     draw_heart(surf, placed - 14, eff_y + 7, 11 + 3 * beat, S.hx(S.LIFE_BOOST["color"]), outline=(255, 255, 255))
                     surf.blit(msg, (placed, eff_y))
 
-        # Indicador central do round, em formato de módulo de telemetria.
+        # Indicador central: round (modo clássico/50 rounds) OU progresso do modo de sobrevivência
+        # (formato "MODO / TEMPO / NÍVEL" pedido no design doc, seção 14: cabeçalho fixo com o nome do
+        # modo, e as linhas de hud_lines() do ModeManager completas logo abaixo).
         self._draw_sci_panel(surf, round_rect, accent=(255, 176, 74), fill=(15, 24, 34), radius=7, border=1)
-        round_txt = font.render(f"ROUND {self.wave.round_no:02d}/{self.rounds_to_win:02d}", True, (255, 190, 94))
+        if self.mode_runner is not None:
+            # Nomes de modo são mais longos que "ROUND XX/YY": fonte um pouco menor para caber no painel.
+            head_font = get_font(S.FONT_UI_NAME, 14, bold=True)
+            head_text, head_col = f"MODO: {S.GAME_MODES[self.game_mode]['label']}", (255, 190, 94)
+            extra_lines = self.mode_runner.hud_lines()
+        else:
+            head_font = font
+            head_text, head_col = f"ROUND {self.wave.round_no:02d}/{self.rounds_to_win:02d}", (255, 190, 94)
+            extra_lines = self.wave.hazards.hud_lines()   # progresso da fase de hazard atual (tempo/restantes)
+        round_txt = head_font.render(head_text, True, head_col)
         surf.blit(round_txt, round_txt.get_rect(center=(round_rect.centerx, round_rect.centery)))
 
         gx = round_rect.centerx
         gy = round_rect.bottom + 2
-        for text, col in self.wave.hazards.hud_lines():       # progresso da fase de hazard atual (tempo/restantes)
+        for text, col in extra_lines:
             chip = small.render(text, True, col)
             surf.blit(chip, chip.get_rect(midtop=(gx, gy)))
             gy += 13
@@ -1051,7 +1012,7 @@ class Game:
         surf.blit(overlay, (0, 0))
 
         # Moldura de interface inspirada em console militar futurista.
-        panel = pygame.Rect(0, 0, min(620, S.WIDTH - 48), 390)
+        panel = pygame.Rect(0, 0, min(620, S.WIDTH - 48), 440)
         panel.center = (S.WIDTH // 2, S.HEIGHT // 2 + 12)
         self._draw_sci_panel(surf, panel, accent=(55, 197, 220), fill=(8, 18, 29), radius=14, border=3)
         micro = get_font(S.FONT_UI_NAME, 13, bold=True).render("SISTEMA DE COMBATE // TERMINAL 07", True, (107, 153, 172))
@@ -1070,7 +1031,7 @@ class Game:
         for i, item in enumerate(TITLE_ITEMS):
             selected = i == self.title_sel
             rect = pygame.Rect(0, 0, 290, 46)
-            rect.center = (panel.centerx, panel.top + 232 + i * 58)
+            rect.center = (panel.centerx, panel.top + 228 + i * 56)
             accent = (255, 176, 74) if item == "quit" else (55, 197, 220)
             fill = (25, 42, 53) if selected else (12, 25, 36)
             pygame.draw.rect(surf, fill, rect, border_radius=6)
@@ -1161,132 +1122,14 @@ class Game:
         self.menu.register_hit_areas(areas)
         self.menu.draw_cursor(surf)
 
-    # ------------------------------------------------------------ tela de configuração de controles (item 4)
-    def _draw_keybinds_screen(self, surf):
-        overlay = pygame.Surface((S.WIDTH, S.HEIGHT), pygame.SRCALPHA)
-        overlay.fill((6, 6, 16, 225))
-        surf.blit(overlay, (0, 0))
-
-        panel = pygame.Rect(0, 0, 760, 560)
-        panel.center = (S.WIDTH // 2, S.HEIGHT // 2)
-        self._draw_sci_panel(surf, panel, accent=(55, 197, 220), fill=(9, 20, 31), radius=12, border=2)
-
-        font_title = get_font(S.FONT_UI_NAME, 26, bold=True)
-        title = font_title.render("CONFIGURAÇÃO DE CONTROLES", True, (240, 240, 250))
-        surf.blit(title, title.get_rect(midtop=(panel.centerx, panel.top + 18)))
-
-        # --- abas de jogador (JOGADOR 1 / 2 / 3 / 4), uma por jogador na partida atual
-        n_players = max(1, len(self.players) or self.player_count)
-        tab_font = get_font(S.FONT_UI_NAME, 15, bold=True)
-        tab_w = (panel.width - 32) / n_players
-        tab_areas = []
-        for i in range(n_players):
-            cfg = S.PLAYER_DEFS[i]
-            tab_rect = pygame.Rect(panel.left + 16 + int(i * tab_w), panel.top + 58, int(tab_w) - 4, 34)
-            active = i == self.keybinds_player
-            col = S.hx(cfg["color"])
-            bg = col if active else (40, 40, 56)
-            pygame.draw.rect(surf, bg, tab_rect, border_radius=8)
-            if not active:
-                pygame.draw.rect(surf, col, tab_rect, width=2, border_radius=8)
-            using_gp = self.input.player_uses_gamepad(i)
-            label = cfg["short"] + (" 🎮" if using_gp else " ⌨")
-            txt = tab_font.render(label, True, (10, 10, 18) if active else col)
-            surf.blit(txt, txt.get_rect(center=tab_rect.center))
-            tab_areas.append((tab_rect, i))
-
-        gp_slot = self.input.bindings[self.keybinds_player].gamepad_slot
-        gp = self.input.gamepad
-        if gp_slot is not None and gp.is_connected(gp_slot):
-            fam = gp.family(gp_slot)
-            sub = get_font(S.FONT_UI_NAME, 13).render(
-                f"Controle: {gp.name(gp_slot)} ({GP.FAMILY_NAMES[fam]})", True, (160, 200, 255))
-        else:
-            sub = get_font(S.FONT_UI_NAME, 13).render(
-                "Usando teclado — aperte um botão do controle para associá-lo a este jogador",
-                True, (160, 160, 180))
-        surf.blit(sub, sub.get_rect(midtop=(panel.centerx, panel.top + 98)))
-
-        # --- linhas de atalho: nome da ação à esquerda, caixa arredondada com a tecla/botão à direita
-        row_font = get_font(S.FONT_UI_NAME, 19)
-        key_font = get_font(S.FONT_UI_NAME, 17, bold=True)
-        row_y0 = panel.top + 134
-        row_h = 46
-        row_areas = []
-        fam = gp.family(gp_slot) if (gp_slot is not None and gp.is_connected(gp_slot)) else GP.XBOX
-        for i, action in enumerate(REBIND_ACTIONS):
-            ry = row_y0 + i * row_h
-            row_rect = pygame.Rect(panel.left + 16, ry, panel.width - 32, row_h - 6)
-            selected = (self.rebinding is None and i == getattr(self, "_keybinds_row", 0))
-            if selected:
-                pygame.draw.rect(surf, (21, 39, 51), row_rect, border_radius=6)
-            if i > 0:
-                pygame.draw.line(surf, (42, 65, 79), (row_rect.left, ry - 3), (row_rect.right, ry - 3), 1)
-
-            label = row_font.render(REBIND_ACTION_LABELS[action], True, (230, 230, 240))
-            surf.blit(label, (row_rect.left + 14, row_rect.centery - label.get_height() // 2))
-
-            # caixa da tecla (estilo "key cap" arredondado, como na referência)
-            key_label = self.input.key_display(self.keybinds_player, action)
-            is_capturing = self.rebinding == (self.keybinds_player, i)
-            box_w = max(54, key_font.size(key_label)[0] + 26)
-            box = pygame.Rect(0, 0, box_w, 32)
-            box.midright = (row_rect.right - 170, row_rect.centery)
-            box_col = (75, 53, 23) if is_capturing else (19, 34, 46)
-            pygame.draw.rect(surf, box_col, box, border_radius=8)
-            pygame.draw.rect(surf, (65, 101, 120) if not is_capturing else (255, 176, 74), box, width=2,
-                              border_radius=8)
-            ktxt = key_font.render("..." if is_capturing else key_label, True, (240, 240, 250))
-            surf.blit(ktxt, ktxt.get_rect(center=box.center))
-
-            # botão do controle equivalente (ícone colorido no padrão da família detectada)
-            btn_name = S.GAMEPAD_BUTTONS.get(action)
-            if btn_name:
-                blabel = GP.button_label(btn_name, fam)
-                bcolor = S.hx(GP.button_color(btn_name, fam))
-                bcircle = pygame.Rect(0, 0, 32, 32)
-                bcircle.midright = (row_rect.right - 16, row_rect.centery)
-                pygame.draw.circle(surf, bcolor, bcircle.center, 15)
-                pygame.draw.circle(surf, (20, 20, 28), bcircle.center, 15, width=2)
-                bt = get_font(S.FONT_UI_NAME, 13, bold=True).render(blabel, True, (20, 20, 28))
-                surf.blit(bt, bt.get_rect(center=bcircle.center))
-
-            row_areas.append(row_rect)
-
-        # --- rodapé: Restaurar Padrões / Voltar
-        foot_y = row_y0 + len(REBIND_ACTIONS) * row_h + 18
-        foot_font = get_font(S.FONT_UI_NAME, 20, bold=True)
-        reset_rect = pygame.Rect(0, 0, 240, 42)
-        reset_rect.midleft = (panel.left + 40, foot_y + 20)
-        back_rect = pygame.Rect(0, 0, 160, 42)
-        back_rect.midright = (panel.right - 40, foot_y + 20)
-        reset_sel = self.rebinding is None and getattr(self, "_keybinds_row", 0) == len(REBIND_ACTIONS)
-        back_sel = self.rebinding is None and getattr(self, "_keybinds_row", 0) == len(REBIND_ACTIONS) + 1
-        pygame.draw.rect(surf, (60, 40, 20) if reset_sel else (40, 40, 56), reset_rect, border_radius=10)
-        pygame.draw.rect(surf, (255, 180, 90) if reset_sel else (90, 90, 110), reset_rect, width=2, border_radius=10)
-        rtxt = foot_font.render("RESTAURAR PADRÕES", True, (255, 220, 180) if reset_sel else (210, 210, 220))
-        surf.blit(rtxt, rtxt.get_rect(center=reset_rect.center))
-        pygame.draw.rect(surf, (20, 60, 40) if back_sel else (40, 40, 56), back_rect, border_radius=10)
-        pygame.draw.rect(surf, (120, 230, 160) if back_sel else (90, 90, 110), back_rect, width=2, border_radius=10)
-        btxt = foot_font.render("VOLTAR", True, (200, 255, 220) if back_sel else (210, 210, 220))
-        surf.blit(btxt, btxt.get_rect(center=back_rect.center))
-        row_areas.append(reset_rect)
-        row_areas.append(back_rect)
-
-        self.menu.register_hit_areas(row_areas)
-        # abas de jogador usam índices negativos (-1, -2, ...) para não colidir com as linhas de ação acima
-        self.menu.register_extra_hit_areas([(rect, -(i + 1)) for rect, i in tab_areas])
-
-        hint = get_font(S.FONT_UI_NAME, 14).render(
-            "←/→ troca de jogador · ENTER remapeia · ESC/clique direito volta", True, (150, 150, 170))
-        surf.blit(hint, hint.get_rect(midbottom=(panel.centerx, panel.bottom - 10)))
-        self.menu.draw_cursor(surf)
-
     def _draw_gameover(self, surf):
         overlay = pygame.Surface((S.WIDTH, S.HEIGHT), pygame.SRCALPHA)
         overlay.fill((1, 5, 10, 210))
         surf.blit(overlay, (0, 0))
-        panel = pygame.Rect(0, 0, min(620, S.WIDTH - 48), 300)
+        # Modos de sobrevivência mostram 2-3 linhas de resultado + o selo de recorde: painel mais alto
+        # para tudo caber sem sobrepor a dica de rodapé (ver _draw_gameover_mode_result).
+        panel_h = 300 if self.mode_runner is None else 300 + max(0, len(self.mode_runner.result_lines()) - 1) * 44
+        panel = pygame.Rect(0, 0, min(620, S.WIDTH - 48), panel_h)
         panel.center = (S.WIDTH // 2, S.HEIGHT // 2)
         accent = (91, 220, 177) if self.victory else (255, 112, 91)
         self._draw_sci_panel(surf, panel, accent=accent, fill=(8, 18, 29), radius=12, border=3)
@@ -1295,7 +1138,9 @@ class Game:
         txt = font_title.render(msg, True, (228, 239, 244))
         surf.blit(txt, txt.get_rect(center=(panel.centerx, panel.top + 70)))
         pygame.draw.line(surf, accent, (panel.left + 65, panel.top + 108), (panel.right - 65, panel.top + 108), 1)
-        if self.winner is not None:
+        if self.mode_runner is not None:
+            self._draw_gameover_mode_result(surf, panel)
+        elif self.winner is not None:
             font = get_font(S.FONT_UI_NAME, 23, bold=True)
             w = font.render(f"{self.winner.name} venceu", True, self.winner.color)
             surf.blit(w, w.get_rect(center=(panel.centerx, panel.top + 148)))
@@ -1306,6 +1151,26 @@ class Game:
         if self.gameover_t > S.GAMEOVER_INPUT_LOCK:
             hint = get_font(S.FONT_UI_NAME, 15).render("ENTER / CLIQUE / A NO CONTROLE: VER ESTATÍSTICAS", True, (131, 163, 179))
             surf.blit(hint, hint.get_rect(center=(panel.centerx, panel.bottom - 35)))
+
+    def _draw_gameover_mode_result(self, surf, panel):
+        """Resultado do modo de sobrevivência (seção 21 do design doc: TEMPO/NÍVEL/ROUND/ONDA + MELHOR),
+        uma linha por item de ModeManager.result_lines(), com destaque quando é um novo recorde."""
+        label_font = get_font(S.FONT_UI_NAME, 13)
+        value_font = get_font(S.FONT_UI_NAME, 21, bold=True)
+        is_new_record = bool(self.mode_record_result and self.mode_record_result[0])
+        lines = self.mode_runner.result_lines()
+        total_h = len(lines) * 44
+        y = panel.top + 134 + max(0, (panel.height - 134 - 40 - total_h) // 2)
+        for label, value in lines:
+            lbl = label_font.render(label, True, (140, 165, 180))
+            surf.blit(lbl, lbl.get_rect(center=(panel.centerx, y)))
+            val_col = S.hx("#ffd23f") if (is_new_record and label.startswith("MELHOR")) else (225, 235, 240)
+            val = value_font.render(value, True, val_col)
+            surf.blit(val, val.get_rect(center=(panel.centerx, y + 20)))
+            y += 44
+        if is_new_record:
+            msg = label_font.render("★ NOVO RECORDE! ★", True, S.hx("#ffd23f"))
+            surf.blit(msg, msg.get_rect(center=(panel.centerx, y + 2)))
 
     # ------------------------------------------------------------ tela de MVP / resumo (item 6)
     def _draw_mvp_screen(self, surf):

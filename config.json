@@ -2,17 +2,106 @@
   "version": 1,
   "audio": {
     "music_volume": 15,
-    "sfx_volume": 34
+    "sfx_volume": 5
   },
   "video": {
     "width": 1280,
     "height": 720,
     "fullscreen": true
   },
-  "controls": {},
+  "controls": {
+    "1": {
+      "keyboard": {
+        "left": "a",
+        "right": "d",
+        "jump": "w",
+        "dash": "s",
+        "fire": "space",
+        "donate_life": "e"
+      },
+      "xbox": {
+        "jump": "a",
+        "dash": "rb",
+        "fire": "x",
+        "donate_life": "lb"
+      },
+      "playstation": {
+        "jump": "a",
+        "dash": "b",
+        "fire": "x",
+        "donate_life": "y"
+      }
+    },
+    "2": {
+      "keyboard": {
+        "left": "left",
+        "right": "right",
+        "jump": "up",
+        "dash": "down",
+        "fire": "return",
+        "donate_life": "right shift"
+      },
+      "xbox": {
+        "jump": "a",
+        "dash": "b",
+        "fire": "x",
+        "donate_life": "y"
+      },
+      "playstation": {
+        "jump": "a",
+        "dash": "b",
+        "fire": "x",
+        "donate_life": "y"
+      }
+    },
+    "3": {
+      "keyboard": {
+        "left": "j",
+        "right": "l",
+        "jump": "i",
+        "dash": "k",
+        "fire": "o",
+        "donate_life": "u"
+      },
+      "xbox": {
+        "jump": "a",
+        "dash": "b",
+        "fire": "x",
+        "donate_life": "y"
+      },
+      "playstation": {
+        "jump": "a",
+        "dash": "b",
+        "fire": "x",
+        "donate_life": "y"
+      }
+    },
+    "4": {
+      "keyboard": {
+        "left": "kp4",
+        "right": "kp6",
+        "jump": "kp8",
+        "dash": "kp5",
+        "fire": "kp0",
+        "donate_life": "kp_enter"
+      },
+      "xbox": {
+        "jump": "a",
+        "dash": "b",
+        "fire": "x",
+        "donate_life": "y"
+      },
+      "playstation": {
+        "jump": "a",
+        "dash": "b",
+        "fire": "x",
+        "donate_life": "y"
+      }
+    }
+  },
   "records": {
     "rockets_sky": 131.71699999999996,
-    "ball_rain": 5,
+    "ball_rain": 6,
     "mechanic_room": 7,
     "crazy_car": 6
   }

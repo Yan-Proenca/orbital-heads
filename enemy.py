@@ -848,13 +848,14 @@ class CyberCar(Enemy):
         return self.game.match_time < self._damage_cd_until.get(p.idx, -1.0)
 
     def draw(self, surf):
-        """Pisca o corpo ao receber dano (tiros ou stomp), mantendo a barra e o aviso visíveis."""
-        if self.hit_invuln > 0.0:
-            elapsed = HIT_INVULNERABILITY_TIME - self.hit_invuln
-            # Alterna a visibilidade em ciclos rápidos (mesmo padrão do _draw_hit_feedback)
-            if int(elapsed / 0.045) % 2 != 0:
+        """Pisca o corpo exatamente como o player durante o stomp_lock, mantendo a barra e o aviso visíveis."""
+        if self.stomp_lock > 0.0:
+            # Mesma fórmula visual do player (multiplicador 14 e paridade ímpar)
+            if int(self.stomp_lock * 14) % 2 == 1:
                 self._draw_extra(surf)
                 return
+
+        super().draw(surf)
 
         super().draw(surf)
 

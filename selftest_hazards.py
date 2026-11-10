@@ -1405,14 +1405,22 @@ def test_mechanic_room_nao_quebra_outros_modos():
 
 
 # ============================================================================= MODO CRAZY CAR
-def defeat_car(g, killer=None, max_frames=600):
+def defeat_car(g, killer=None, max_frames=None):
     """Helper de teste: pula no carro atual repetidamente (stomp real, respeitando stomp_lock) até ele
     morrer. Dá mais 1 quadro após a morte para o CrazyCarMode.update() detectar isso e criar o carro
     do próximo nível (_on_car_defeated/_spawn_car só rodam no próximo game.step(), nunca dentro do
     próprio on_stomp) — assim quem chama este helper já lê g.mode_runner.car como o carro NOVO.
     Checa car.alive diretamente: game.on_stomp() não repassa o retorno de car.stomp() para fora, então
-    não dá para confiar no valor de retorno de on_stomp aqui. Retorna True se uma derrota aconteceu."""
+    não dá para confiar no valor de retorno de on_stomp aqui. Retorna True se uma derrota aconteceu.
+
+    max_frames=None calcula automaticamente a partir de impacts_left e CRAZY_CAR_HIT_INVULN (o carro
+    fica invulnerável por até 2s a cada impacto — ver CyberCar.stomp), com folga de 50%, em vez de um
+    número fixo que vazaria toda vez que a invulnerabilidade por impacto mudar de novo no futuro."""
     killer = killer or g.players[0]
+    if max_frames is None:
+        car = g.mode_runner.car
+        frames_per_impact = int(S.CRAZY_CAR_HIT_INVULN * 60) + 10
+        max_frames = int(car.impacts_left * frames_per_impact * 1.5) + 60
     for _ in range(max_frames):
         car = g.mode_runner.car
         if car.alive and car.stomp_lock <= 0:
@@ -1586,6 +1594,160 @@ def test_crazy_car_nao_quebra_outros_modos():
     g2 = mk(1, mode="mechanic_room", seed=53)
     tick(g2, 30)
     check(g2.mode_runner.wave_no == 1, "Mechanic Room deveria continuar funcionando normalmente")
+
+
+# ============================================================================= CRAZY CAR — ATUALIZAÇÃO
+# (invincibility frame do carro, vida em %, foguetes mais lentos/numerosos, carro mais rápido)
+def test_crazy_car_teste_a_invulnerabilidade_e_do_carro():
+    """Teste A do pedido: quem fica invulnerável é o CARRO, nunca o player."""
+    g = mk(2, mode="crazy_car", seed=61)
+    p0, p1 = g.players
+    car = g.mode_runner.car
+    car.speed = 0.0
+    p0.x, p0.y, p0.vy, p0.on_ground, p0.invuln = car.x, car.hb[1] - 5, 300.0, False, 0.0
+    tick(g, 1, shield=False)
+    check(car.impacts_left == car.impacts_max - 1, "primeiro impacto deveria valer normalmente")
+    check(car.stomp_lock > 1.9, f"carro deveria ficar invulnerável por ~2s, stomp_lock={car.stomp_lock}")
+    # p1 pisa durante a invulnerabilidade do carro: nenhum dano adicional
+    p1.x, p1.y, p1.vy, p1.on_ground, p1.invuln = car.x, car.hb[1] - 5, 300.0, False, 0.0
+    tick(g, 1, shield=False)
+    check(car.impacts_left == car.impacts_max - 1, "impacto durante a invulnerabilidade do carro deveria ser ignorado")
+    # p0 pisa de novo pouco depois: ainda ignorado. shield=True enquanto o jogador fica parado perto/sobre
+    # o carro por vários quadros — o que está sob teste aqui é o stomp_lock do carro, não a sobrevivência
+    # do jogador (coberta à parte pelo teste de phasing); sem o shield ele tomaria dano normal assim que
+    # o cooldown de contato expirasse, derrubando o teste por um motivo que não é o que ele verifica.
+    p0.x, p0.y, p0.vy, p0.on_ground = car.x, car.hb[1] - 5, 300.0, False
+    tick(g, 41, shield=True)
+    tick(g, 1, shield=False)   # ~0.7s desde o impacto, 1 quadro sem shield para a checagem valer de fato
+    check(car.impacts_left == car.impacts_max - 1, "impacto a 0.7s do anterior ainda deveria ser ignorado (< 2s)")
+    # espera os 2s completos: o próximo impacto deve valer
+    tick(g, int(S.CRAZY_CAR_HIT_INVULN * 60) + 4, shield=True)
+    p0.x, p0.y, p0.vy, p0.on_ground = car.x, car.hb[1] - 5, 300.0, False
+    tick(g, 1, shield=False)
+    check(car.impacts_left == car.impacts_max - 2, "impacto após os 2s completos deveria valer normalmente")
+
+
+def test_crazy_car_teste_b_repeticao_do_invincibility_frame():
+    """Teste B do pedido: a cada impacto válido, reinicia os 2s — isso deve se repetir indefinidamente.
+    shield=True durante a espera: o que está sob teste é o stomp_lock do CARRO, não a sobrevivência do
+    jogador parado dentro do carro por 2s (isso é coberto à parte pelo teste de phasing)."""
+    g = mk(1, mode="crazy_car", seed=62)
+    p = g.players[0]
+    car = g.mode_runner.car
+    car.speed = 0.0
+    impacts_seen = [car.impacts_left]
+    for _ in range(3):
+        p.x, p.y, p.vy, p.on_ground = car.x, car.hb[1] - 5, 300.0, False
+        tick(g, 1, shield=False)
+        check(car.stomp_lock > 1.9, "cada impacto válido deveria reiniciar os ~2s de invulnerabilidade do carro")
+        impacts_seen.append(car.impacts_left)
+        tick(g, int(S.CRAZY_CAR_HIT_INVULN * 60) + 5, shield=True)
+    check(impacts_seen == list(range(car.impacts_max, car.impacts_max - 4, -1)),
+          f"cada ciclo de 2s deveria permitir exatamente 1 novo impacto: {impacts_seen}")
+
+
+def test_crazy_car_carro_pisca_durante_invulnerabilidade():
+    """O carro deve piscar (alternar cor) durante a janela de invulnerabilidade, não ficar com cor fixa."""
+    g = mk(1, mode="crazy_car", seed=63)
+    p = g.players[0]
+    car = g.mode_runner.car
+    car.speed = 0.0
+    p.x, p.y, p.vy, p.on_ground, p.invuln = car.x, car.hb[1] - 5, 300.0, False, 0.0
+    tick(g, 1, shield=False)
+    check(car.hit_flash_t > 1.9, "hit_flash_t deveria começar em ~2s após o impacto")
+    flash_states = []
+    for _ in range(130):
+        tick(g, 1, shield=False)
+        flash_states.append(car.flash > 0)
+    transitions = sum(1 for i in range(1, len(flash_states)) if flash_states[i] != flash_states[i - 1])
+    check(transitions >= 8, f"o carro deveria piscar (alternar) várias vezes em ~2s, só alternou {transitions}x")
+    check(car.hit_flash_t == 0.0, "hit_flash_t deveria ter zerado depois de ~2.2s")
+
+
+def test_crazy_car_teste_c_vida_em_porcentagem():
+    """Teste C do pedido: 100/80/60/40/20/0% (ou equivalente), nunca abaixo de 0 nem acima de 100."""
+    g = mk(1, mode="crazy_car", seed=64)
+    mr = g.mode_runner
+    mr.level = 5    # impacts_max = 8 (ver CRAZY_CAR_IMPACTS_BY_LEVEL) -> múltiplos de 12.5%, caso redondo
+    mr._spawn_car()
+    car = mr.car
+    percents = [mr.car_hp_percent()]
+    while car.alive and car.impacts_left > 0:
+        car.stomp_lock = 0.0
+        g.on_stomp(car, g.players[0])
+        percents.append(mr.car_hp_percent())
+    check(percents[0] == 100, f"vida cheia deveria ser 100%, foi {percents[0]}")
+    check(percents[-1] == 0, f"vida zerada deveria ser 0%, foi {percents[-1]}")
+    check(percents == sorted(percents, reverse=True), f"porcentagem deveria só cair a cada impacto: {percents}")
+    check(all(0 <= p <= 100 for p in percents), f"porcentagem fora de [0,100]: {percents}")
+    line = [t for t, _ in mr.hud_lines() if "VIDA DO CARRO" in t][0]
+    check(line.endswith("%"), f"HUD deveria mostrar porcentagem com '%': {line!r}")
+
+
+def test_crazy_car_teste_d_foguetes_mais_lentos_e_numerosos():
+    """Teste D do pedido: foguetes mais lentos, em maior quantidade, progressão por nível, teto respeitado."""
+    cfg4 = CrazyCarMode._rockets_for_level(S.CRAZY_CAR_ROCKETS_START_LEVEL)
+    cfg_far = CrazyCarMode._rockets_for_level(S.CRAZY_CAR_ROCKETS_START_LEVEL + 20)
+    check(0.55 <= cfg4["speed_mult"] <= 0.70, f"speed_mult do Crazy Car deveria estar entre 0.55 e 0.70, é {cfg4['speed_mult']}")
+    check(cfg4["speed_mult"] == cfg_far["speed_mult"], "a velocidade reduzida deveria ser constante entre níveis")
+    check(cfg_far["max_alive"] > cfg4["max_alive"], "a quantidade máxima deveria crescer com o nível")
+    check(cfg_far["max_alive"] <= S.CRAZY_CAR_ROCKETS_MAX_ALIVE_CAP, "quantidade máxima estourou o teto de segurança")
+    # a velocidade individual de um foguete nascido no Crazy Car é realmente mais lenta que o padrão
+    g = mk(1, mode="crazy_car", seed=65)
+    g.mode_runner.level = S.CRAZY_CAR_ROCKETS_START_LEVEL
+    g.mode_runner._spawn_car()
+    tick(g, 60 * 3)
+    rockets = [r for r in g.wave.hazards.rockets if r.alive]
+    if rockets:
+        r = rockets[0]
+        base_lo, base_hi = S.ROCKET_TYPES[r.rtype]["speed"]
+        check(r.speed <= base_hi * 0.75, f"foguete do Crazy Car deveria ser bem mais lento que o padrão: speed={r.speed}, base até {base_hi}")
+
+    # confirma que o Rockets Sky e o Clássico NÃO foram afetados pelo speed_mult do Crazy Car
+    g2 = mk(1, mode="rockets_sky", seed=66)
+    tick(g2, 60 * 3)
+    check(g2.mode_runner.phase_cfg["speed_mult"] != S.CRAZY_CAR_ROCKETS_SPEED_MULT or
+          abs(g2.mode_runner.phase_cfg["speed_mult"] - S.ROCKETS_SKY_SPEED_MULT[0]) < 1e-6,
+          "Rockets Sky não deveria ter sido afetado pelo speed_mult do Crazy Car")
+
+
+def test_crazy_car_teste_e_carro_mais_rapido():
+    """Teste E do pedido: carro mais rápido, progressivo, teto respeitado, Clássico/50 Rounds intocados."""
+    speed_lvl1 = CrazyCarMode._speed_for_level(1)
+    speed_lvl5 = CrazyCarMode._speed_for_level(5)
+    speed_far = CrazyCarMode._speed_for_level(500)
+    check(speed_lvl1 > S.CAR["speed"], f"nível 1 do Crazy Car deveria já ser mais rápido que S.CAR['speed'] ({S.CAR['speed']}), é {speed_lvl1}")
+    check(speed_lvl5 > speed_lvl1, "velocidade deveria crescer com o nível")
+    check(speed_far <= S.CRAZY_CAR_MAX_SPEED + 1e-9, "velocidade não deveria ultrapassar CRAZY_CAR_MAX_SPEED")
+    check(S.CAR["speed"] == 190.0, "S.CAR['speed'] não deveria ter sido alterado (usado pelo Clássico/50 Rounds)")
+
+    g = mk(2, mode="classic", seed=67)
+    to_combat(g, 7)
+    car = g.wave.cars[0] if g.wave.cars else None
+    check(car is not None and abs(car.speed - S.CAR["speed"]) < 1.0,
+          f"CyberCar do Clássico deveria continuar com a velocidade original (~{S.CAR['speed']}), tem {car.speed if car else None}")
+
+
+def test_crazy_car_outros_modos_continuam_intocados_apos_atualizacao():
+    """Confirma que nenhuma das mudanças desta atualização vazou para os outros 5 modos."""
+    g = mk(2, mode="classic", seed=68)
+    to_combat(g, 7)
+    car = g.wave.cars[0]
+    check(car.phasing_enabled is False, "CyberCar do Clássico não deveria ter phasing habilitado")
+    check(car.stomp_lock <= S.CAR["stomp_lock"] + 1e-9 or car.stomp_lock == 0.0,
+          "stomp_lock do Clássico deveria continuar curto (0.3s), nunca os 2s do Crazy Car")
+
+    g2 = mk(1, mode="ball_rain", seed=69)
+    tick(g2, 30)
+    check(g2.mode_runner.round_no >= 1, "Ball Rain deveria continuar funcionando normalmente")
+
+    g3 = mk(1, mode="mechanic_room", seed=70)
+    tick(g3, 30)
+    check(g3.mode_runner.wave_no >= 1, "Mechanic Room deveria continuar funcionando normalmente")
+
+    g4 = mk(1, mode="rockets_sky", seed=71)
+    tick(g4, 60 * 11)
+    check(g4.mode_runner.level == 2, "Rockets Sky deveria continuar com sua própria progressão de nível")
 
 
 TESTS = [v for k, v in sorted(globals().items(), key=lambda kv: kv[1].__code__.co_firstlineno if callable(kv[1]) and hasattr(kv[1], "__code__") else 0)

@@ -5,9 +5,9 @@
     "sfx_volume": 5
   },
   "video": {
-    "width": 1280,
-    "height": 720,
-    "fullscreen": true
+    "width": 1024,
+    "height": 576,
+    "fullscreen": false
   },
   "controls": {
     "1": {
@@ -103,6 +103,6 @@
     "rockets_sky": 131.71699999999996,
     "ball_rain": 6,
     "mechanic_room": 7,
-    "crazy_car": 6
+    "crazy_car": 7
   }
 }

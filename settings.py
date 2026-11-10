@@ -93,7 +93,7 @@ ENEMY_CLASSES_KINDS = ("drone", "ship", "machine", "mini")
 ROUNDS_TO_WIN = 10      # default/fallback; o valor real por partida é GAME_MODES[modo]["rounds_to_win"]
 ROUND_TABLE = {
     1: (8, 10, 0), 2: (12, 12, 3), 3: (12, 14, 4), 4: (10, 16, 4), 5: (0, 10, 4),
-    6: (0, 14, 4), 7: (0, 14, 4), 8: (0, 16, 4), 9: (0, 10, 6), 10: (0, 10, 5),
+    6: (0, 10, 4), 7: (0, 14, 4), 8: (0, 16, 4), 9: (0, 10, 6), 10: (0, 10, 5),
 }
 ENDLESS_BASE_ROUND = 3
 GROWTH_PER_ROUND = (2, 2, 1)
@@ -274,21 +274,36 @@ CRAZY_CAR_INITIAL_IMPACTS = 3
 CRAZY_CAR_IMPACTS_BY_LEVEL = (3, 4, 5, 6, 8, 10)    # níveis 1-6; acima disso usa CRAZY_CAR_IMPACTS_GROWTH
 CRAZY_CAR_IMPACTS_GROWTH = 2                # níveis acima da tabela: +2 por nível
 CRAZY_CAR_MAX_IMPACTS = 40
-CRAZY_CAR_SPEED_INCREMENT = 14.0            # px/s por nível
+# Velocidade do carro: multiplicador aplicado sobre S.CAR["speed"] SÓ no Crazy Car (nunca altera
+# S.CAR["speed"] em si, que o Clássico/50 Rounds também usam) — carro sensivelmente mais rápido desde o
+# nível 1, continuando a progressão de +px/s por nível por cima desse ponto de partida mais alto.
+CRAZY_CAR_BASE_SPEED_MULT = 1.55            # nível 1: 190 * 1.55 ≈ 294.5 px/s (era 190 px/s)
+CRAZY_CAR_SPEED_INCREMENT = 14.0            # px/s por nível, igual antes
 CRAZY_CAR_MAX_SPEED = 420.0
 CRAZY_CAR_TURBO_START_LEVEL = 5
 CRAZY_CAR_TURBO_CHANCE_BY_LEVEL = 0.12      # chance extra de turbo por nível acima do início, com teto abaixo
 CRAZY_CAR_TURBO_CHANCE_MAX = 0.85
 CRAZY_CAR_ROCKETS_START_LEVEL = 4
-CRAZY_CAR_ROCKETS_MAX_ALIVE_BY_LEVEL = 1    # +1 foguete simultâneo permitido por nível acima do início
-CRAZY_CAR_ROCKETS_MAX_ALIVE_CAP = 5
-CRAZY_CAR_ROCKETS_INTERVAL = (3.2, 1.1)     # (no nível inicial de foguetes, teto) segundos entre foguetes
+# Mais foguetes, porém mais lentos (gameplay mais legível: chuva numerosa, fácil de acompanhar/desviar).
+CRAZY_CAR_ROCKETS_MAX_ALIVE_BY_LEVEL = 2    # +2 foguetes simultâneos permitidos por nível acima do início (era 1)
+CRAZY_CAR_ROCKETS_MAX_ALIVE_CAP = 9         # trava de segurança de performance (era 5)
+CRAZY_CAR_ROCKETS_INTERVAL = (2.4, 0.5)     # (no nível inicial de foguetes, teto) segundos entre foguetes — mais
+# frequentes que antes (3.2→1.1), compensando a velocidade individual mais baixa de cada foguete
+CRAZY_CAR_ROCKETS_SPEED_MULT = 0.62         # 0.55~0.70: só os foguetes DO CRAZY CAR ficam mais lentos; Rockets
+# Sky e a fase "rockets" do Clássico continuam com sua própria velocidade (ROCKETS_SKY_SPEED_MULT, sem teto aqui)
 CRAZY_CAR_ROCKETS_LARGE_LEVEL = 9           # a partir deste nível, foguetes médios entram na mistura
 
 # Phasing + cooldown de dano ao aterrissar sobre o Crazy Car (ver player.py/collisions.py). Mesmo espírito
 # de Player.invuln, mas restrito ao contato com o carro: nenhuma outra fonte de dano é afetada.
 CRAZY_CAR_PLAYER_PHASING_DURATION = 2.0
 CRAZY_CAR_PLAYER_DAMAGE_COOLDOWN = 2.0
+
+# Invencibilidade do CARRO (não do jogador) após um impacto válido: reaproveita CyberCar.stomp_lock,
+# só que com 2.0s no Crazy Car em vez dos 0.3s "anti-multi-stomp-no-mesmo-quadro" do Clássico/50 Rounds
+# (CAR["stomp_lock"], intocado). Durante essa janela o carro pisca (CyberCar.hit_flash_t) para o jogador
+# ver que aquele impacto já valeu e se preparar para o próximo.
+CRAZY_CAR_HIT_INVULN = 2.0
+CRAZY_CAR_HIT_BLINK_INTERVAL = 0.12         # meio-período do piscar (liga/desliga a cada esse tempo)
 
 # Posição de nascimento do Crazy Car: sempre perto da borda direita da arena (Clássico, 50 Rounds e
 # Crazy Car usam a mesma regra, centralizada em CyberCar.spawn_x()).

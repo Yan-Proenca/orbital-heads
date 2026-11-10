@@ -48,7 +48,7 @@ class CollisionManager:
             cand = self.grid.query(hb) if use_grid else targets
             best = None
             for t in cand:
-                if not t.alive:
+                if not t.alive or getattr(t, "hit_invuln", 0.0) > 0.0:
                     continue
                 th = t.hb
                 checked += 1

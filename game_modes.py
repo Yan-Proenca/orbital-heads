@@ -376,7 +376,12 @@ class CrazyCarMode(ModeManager):
 
     @staticmethod
     def _speed_for_level(level):
-        return min(S.CRAZY_CAR_MAX_SPEED, S.CAR["speed"] + S.CRAZY_CAR_SPEED_INCREMENT * (level - 1))
+        """Velocidade do carro SÓ no Crazy Car: parte de S.CAR['speed'] multiplicado por
+        CRAZY_CAR_BASE_SPEED_MULT (carro sensivelmente mais rápido já no nível 1) e soma o incremento
+        por nível de sempre, sempre respeitando CRAZY_CAR_MAX_SPEED. S.CAR['speed'] em si nunca é
+        alterado — o Clássico/50 Rounds continuam usando 190.0 px/s como sempre."""
+        base = S.CAR["speed"] * S.CRAZY_CAR_BASE_SPEED_MULT
+        return min(S.CRAZY_CAR_MAX_SPEED, base + S.CRAZY_CAR_SPEED_INCREMENT * (level - 1))
 
     @staticmethod
     def _turbo_for_level(level):
@@ -389,7 +394,14 @@ class CrazyCarMode(ModeManager):
 
     @staticmethod
     def _rockets_for_level(level):
-        """None quando o nível ainda não libera foguetes (8.7: 'Level 1-3 → Somente Crazy Car')."""
+        """None quando o nível ainda não libera foguetes (8.7: 'Level 1-3 → Somente Crazy Car').
+
+        Balanceamento: mais quantidade, porém mais lentos (gameplay mais legível — uma chuva numerosa,
+        mas fácil de acompanhar e desviar, em vez de poucos foguetes muito rápidos). A quantidade
+        simultânea cresce mais rápido que antes (CRAZY_CAR_ROCKETS_MAX_ALIVE_BY_LEVEL) até o teto de
+        segurança CRAZY_CAR_ROCKETS_MAX_ALIVE_CAP; cada foguete individual nasce com
+        CRAZY_CAR_ROCKETS_SPEED_MULT (0.55~0.70) sobre a velocidade padrão de ROCKET_TYPES — SÓ aqui:
+        Rockets Sky e a fase 'rockets' do Clássico continuam com sua própria velocidade de sempre."""
         if level < S.CRAZY_CAR_ROCKETS_START_LEVEL:
             return None
         above = level - S.CRAZY_CAR_ROCKETS_START_LEVEL
@@ -397,7 +409,8 @@ class CrazyCarMode(ModeManager):
         lo, hi = S.CRAZY_CAR_ROCKETS_INTERVAL
         interval = (max(hi, lo - 0.3 * above), max(hi, lo - 0.3 * above) + 0.4)
         mix = (("small", 5),) if level < S.CRAZY_CAR_ROCKETS_LARGE_LEVEL else (("small", 3), ("medium", 2))
-        return dict(duration=1e9, max_alive=max_alive, interval=interval, mix=mix, speed_mult=1.0)
+        return dict(duration=1e9, max_alive=max_alive, interval=interval, mix=mix,
+                    speed_mult=S.CRAZY_CAR_ROCKETS_SPEED_MULT)
 
     # ------------------------------------------------------------ spawn / progressão de nível
     def _spawn_car(self):
@@ -459,10 +472,19 @@ class CrazyCarMode(ModeManager):
         g.show_banner("CAR DEFEATED!", f"NÍVEL {self.level}", "#ff4d6d", 1.6, alert=True)
         self._spawn_car()
 
+    def car_hp_percent(self):
+        """Vida do carro atual em 0-100%, usando a vida MÁXIMA do carro daquele nível (impacts_max) —
+        nunca a quantidade crua de impactos. Não altera impacts_left/impacts_max nem o dano causado
+        pelo jogador: é só a representação exibida no HUD."""
+        if self.car is None or not self.car.alive or self.car.impacts_max <= 0:
+            return 0
+        percentage = (self.car.impacts_left / self.car.impacts_max) * 100.0
+        return int(round(max(0.0, min(100.0, percentage))))
+
     def hud_lines(self):
-        # Formato exato do design doc (seção 14): MODE / CAR LEVEL / CAR HP.
-        hp = int(self.car.impacts_left) if self.car is not None and self.car.alive else 0
-        return [(f"NÍVEL {self.level}", S.hx("#ff4d6d")), (f"VIDA DO CARRO {hp}", (255, 255, 255))]
+        # Formato do design doc (seção 14: MODE / CAR LEVEL / CAR HP), com a vida em porcentagem.
+        pct = self.car_hp_percent()
+        return [(f"NÍVEL {self.level}", S.hx("#ff4d6d")), (f"VIDA DO CARRO {pct}%", (255, 255, 255))]
 
     def result_lines(self):
         # Seção 21: CAR LEVEL / CAR DEFEATS / BEST LEVEL.

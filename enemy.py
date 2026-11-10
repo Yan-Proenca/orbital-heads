@@ -17,6 +17,9 @@ from utils import clamp, ease_out, draw_glow_circle, pulse, get_font
 
 HIDDEN_HB = (-9999.0, -9999.0, -9990.0, -9990.0)
 
+# Tempo de invulnerabilidade após receber dano (aprox. 8 frames a 60 FPS).
+HIT_INVULNERABILITY_TIME = 0.14
+
 
 class Enemy:
     """Classe base. slot_x/slot_y = posição "oficial" da formação; x/y = posição
@@ -40,6 +43,7 @@ class Enemy:
         self.phase = phase
         self.t = random.uniform(0, 10)
         self.flash = 0.0
+        self.hit_invuln = 0.0
         self.alive = True
         self.x, self.y = x, y - self.entry
         self.hb = self._calc_hb()
@@ -51,10 +55,14 @@ class Enemy:
     def wobble(self):
         return 0.0, 0.0
 
+    def _update_hit_state(self, dt):
+        """Atualiza os temporizadores visuais e de invulnerabilidade do inimigo."""
+        self.flash = max(0.0, self.flash - dt)
+        self.hit_invuln = max(0.0, self.hit_invuln - dt)
+
     def update(self, dt):
         self.t += dt
-        if self.flash > 0:
-            self.flash -= dt
+        self._update_hit_state(dt)
         ox, oy = self.wobble()
         self.x = self.slot_x + ox
         self.y = self.slot_y - self.entry + oy
@@ -64,10 +72,11 @@ class Enemy:
         return self.hb
 
     def hit(self, dmg=S.SHOT_DAMAGE):
-        if not self.alive:
+        if not self.alive or self.hit_invuln > 0.0:
             return False
         self.hp -= dmg
         self.flash = 0.08
+        self.hit_invuln = HIT_INVULNERABILITY_TIME
         if self.hp <= 1e-9:
             self.alive = False
             return True
@@ -237,21 +246,77 @@ class Enemy:
             pygame.draw.circle(surf, light, (int(x+side*w*.28),int(y-h*.20)), 1)
         line([(x-w*.20,y-h*.31),(x-w*.10,y-h*.36),(x+w*.10,y-h*.36)], light, 1)
 
+        self._draw_hit_feedback(surf)
         self._draw_extra(surf)
         if self.max_hp >= 3 and self.shootable and self.hp < self.max_hp:
             self._draw_bar(surf)
+
+    def _draw_hit_feedback(self, surf):
+        """Pisca uma película de escudo sem esconder o sprite nem sua barra de vida."""
+        if self.hit_invuln <= 0.0:
+            return
+
+        elapsed = HIT_INVULNERABILITY_TIME - self.hit_invuln
+        # Alterna o escudo em intervalos curtos, independentemente do FPS.
+        if int(elapsed / 0.045) % 2 != 0:
+            return
+
+        pad = 5
+        rw = max(1, int(self.w) + pad * 2)
+        rh = max(1, int(self.h) + pad * 2)
+        shield = pygame.Surface((rw, rh), pygame.SRCALPHA)
+        bounds = pygame.Rect(1, 1, rw - 2, rh - 2)
+        radius = max(4, int(min(self.w, self.h) * 0.12))
+        pygame.draw.rect(shield, (70, 220, 255, 28), bounds, border_radius=radius)
+        pygame.draw.rect(shield, (215, 250, 255, 190), bounds, width=2, border_radius=radius)
+        surf.blit(shield, (int(self.x - rw / 2), int(self.y - rh / 2)))
 
     def _draw_extra(self, surf):
         pass
 
     def _draw_bar(self, surf):
-        ratio = clamp(self.hp / self.max_hp, 0.0, 1.0)
-        x0 = self.x - self.w / 2
-        y0 = self.y - self.h / 2 - 12
-        col = S.hx("#46f08a") if ratio > 0.5 else S.hx("#ffd23f") if ratio > 0.25 else S.hx("#ff4d4d")
-        pygame.draw.rect(surf, S.hx("#12142a"), (x0, y0, self.w, 5), border_radius=2)
-        pygame.draw.rect(surf, col, (x0 + 1, y0 + 1, (self.w - 2) * ratio, 3), border_radius=1)
-        pygame.draw.rect(surf, col, (x0, y0, self.w, 5), width=1, border_radius=2)
+        """Desenha uma barra proporcional com o percentual de vida restante."""
+        ratio = clamp(self.hp / self.max_hp, 0.0, 1.0) if self.max_hp > 0 else 0.0
+        percent = int(round(ratio * 100))
+
+        if ratio > 0.60:
+            col = S.hx("#46f08a")
+        elif ratio > 0.30:
+            col = S.hx("#ffd23f")
+        else:
+            col = S.hx("#ff4d4d")
+
+        # Largura limitada para não deixar a barra excessivamente grande.
+        bar_w = max(48, min(90, int(self.w * 0.80)))
+        bar_h = 6
+        gap = 5
+        font = get_font(S.FONT_UI_NAME, 11, bold=True)
+        label = font.render(f"{percent}%", True, col)
+
+        # Centraliza a barra e o percentual como um único conjunto.
+        total_w = bar_w + gap + label.get_width()
+        bar_x = int(self.x - total_w / 2)
+        bar_y = int(self.y - self.h / 2 - 14)
+        bar_rect = pygame.Rect(bar_x, bar_y, bar_w, bar_h)
+
+        pygame.draw.rect(
+            surf, S.hx("#12142a"), bar_rect, border_radius=3
+        )
+
+        fill_w = max(0, int((bar_w - 2) * ratio))
+        if fill_w > 0:
+            fill_rect = pygame.Rect(
+                bar_x + 1, bar_y + 1, fill_w, bar_h - 2
+            )
+            pygame.draw.rect(surf, col, fill_rect, border_radius=2)
+
+        pygame.draw.rect(
+            surf, col, bar_rect, width=1, border_radius=3
+        )
+        surf.blit(
+            label,
+            label.get_rect(midleft=(bar_rect.right + gap, bar_rect.centery))
+        )
 
 
 # ---------------------------------------------------------------- inimigos padrão
@@ -373,8 +438,7 @@ class Boss(Enemy):
 
     def update(self, dt):
         self.t += dt
-        if self.flash > 0:
-            self.flash -= dt
+        self._update_hit_state(dt)
         if self.intro > 0:
             self.intro -= dt
             k = ease_out(1.0 - max(0.0, self.intro) / S.BOSS_INTRO_TIME)
@@ -395,10 +459,11 @@ class Boss(Enemy):
         pass
 
     def hit(self, dmg=S.SHOT_DAMAGE):
-        if not self.alive or self.invulnerable:
+        if not self.alive or self.invulnerable or self.hit_invuln > 0.0:
             return False
         self.hp -= dmg
         self.flash = 0.06
+        self.hit_invuln = HIT_INVULNERABILITY_TIME
         if self.hp <= 1e-9:
             return self.on_hp_zero()
         return False
@@ -677,6 +742,9 @@ class CyberCar(Enemy):
         self.impacts_max = impacts
         self.impacts_left = impacts
         self.stomp_lock = 0.0
+        # Guarda a duração aplicada no impacto; evita depender de uma configuração
+        # que possa mudar enquanto o temporizador já está em andamento.
+        self.stomp_lock_duration = 0.0
         self.turbo = turbo
         self.turbo_on = False
         self.turbo_t = random.uniform(*S.CAR["turbo_every"])
@@ -697,10 +765,9 @@ class CyberCar(Enemy):
     def update(self, dt):
         g = self.game
         self.t += dt
-        if self.flash > 0:
-            self.flash -= dt
+        self._update_hit_state(dt)
         if self.stomp_lock > 0:
-            self.stomp_lock -= dt
+            self.stomp_lock = max(0.0, self.stomp_lock - dt)
         sp = self.speed * g.enemy_move_mult
         if self.turbo:
             self.turbo_t -= dt
@@ -737,10 +804,16 @@ class CyberCar(Enemy):
         if not self.alive or self.stomp_lock > 0:
             return False
         g = self.game
-        self.stomp_lock = S.CAR["stomp_lock"]
+        
+        # Usa 2.0s no Crazy Car (phasing_enabled) e 0.3s no modo Clássico/50 Rounds
+        invuln_duration = S.CRAZY_CAR_HIT_INVULN if getattr(self, "phasing_enabled", False) else S.CAR["stomp_lock"]
+        
+        self.stomp_lock = float(invuln_duration)
+        self.stomp_lock_duration = self.stomp_lock
         self.impacts_left -= 1
         self.hp = float(self.impacts_left)
         self.flash = 0.14
+        self.hit_invuln = HIT_INVULNERABILITY_TIME
         g.fx.sparks(p.x, self.top, "#ffe14d", 8, up=True)
         g.fx.popup(self.x, self.top - 40, "IMPACTO!", "#ffe14d", 20)
         g.shake(0.2, 5)
@@ -750,11 +823,6 @@ class CyberCar(Enemy):
             self.alive = False
             return True
         if not self.phasing_enabled:
-            # Acelerão de "fuga" a cada impacto sobrevivido: comportamento original do Clássico/50 Rounds.
-            # No Crazy Car (phasing_enabled=True) a velocidade é inteiramente progressão POR NÍVEL — ver
-            # CrazyCarMode._speed_for_level, aplicada uma vez ao nascer o carro de cada nível — então este
-            # acelerão por impacto fica desligado lá para não adiantar o teto de velocidade dentro do
-            # próprio nível (o carro ficaria "rápido demais, cedo demais" se os dois sistemas somassem).
             self.speed *= 1.25
         return False
 
@@ -779,18 +847,55 @@ class CyberCar(Enemy):
             return False
         return self.game.match_time < self._damage_cd_until.get(p.idx, -1.0)
 
+    def draw(self, surf):
+        """Pisca o corpo ao receber dano (tiros ou stomp), mantendo a barra e o aviso visíveis."""
+        if self.hit_invuln > 0.0:
+            elapsed = HIT_INVULNERABILITY_TIME - self.hit_invuln
+            # Alterna a visibilidade em ciclos rápidos (mesmo padrão do _draw_hit_feedback)
+            if int(elapsed / 0.045) % 2 != 0:
+                self._draw_extra(surf)
+                return
+
+        super().draw(surf)
+
+        super().draw(surf)
+
     def _draw_extra(self, surf):
         x, y = int(self.x), int(self.y)
-        for i in range(self.impacts_max):
-            lit = i < self.impacts_left
-            col = S.hx("#ffe14d") if lit else S.hx("#3a3f5e")
-            rect = (x - 18 + i * 24, y - 36, 12, 6)
-            if lit:
-                draw_glow_circle(surf, rect[0] + 6, rect[1] + 3, 10, col, intensity=0.7, layers=2)
-            pygame.draw.rect(surf, col, rect, border_radius=2)
-        font = get_font(S.FONT_UI_NAME, 13, bold=True)
+        ratio = clamp(self.hp / self.max_hp, 0.0, 1.0) if self.max_hp > 0 else 0.0
+        percent = int(round(ratio * 100))
+
+        # Barra proporcional à vida restante, acompanhada do percentual numérico.
+        bar_w = max(72, min(100, int(self.w * 0.58)))
+        bar_h = 7
+        font = get_font(S.FONT_UI_NAME, 12, bold=True)
+        percent_label = font.render(f"{percent}%", True, self._health_color(ratio))
+        gap = 6
+        total_w = bar_w + gap + percent_label.get_width()
+        bar_x = int(x - total_w / 2)
+        bar_y = int(y - self.h / 2 - 16)
+        bar_rect = pygame.Rect(bar_x, bar_y, bar_w, bar_h)
+        color = self._health_color(ratio)
+
+        pygame.draw.rect(surf, S.hx("#101827"), bar_rect, border_radius=4)
+        fill_w = max(0, int((bar_w - 2) * ratio))
+        if fill_w:
+            fill_rect = pygame.Rect(bar_x + 1, bar_y + 1, fill_w, bar_h - 2)
+            pygame.draw.rect(surf, color, fill_rect, border_radius=3)
+        pygame.draw.rect(surf, S.hx("#b9c9d8"), bar_rect, width=1, border_radius=4)
+        surf.blit(percent_label, percent_label.get_rect(midleft=(bar_rect.right + gap, bar_rect.centery)))
+
         hint = font.render("▼ PULE EM CIMA", True, S.hx("#ffe14d"))
-        surf.blit(hint, hint.get_rect(center=(x, y - 50)))
+        surf.blit(hint, hint.get_rect(center=(x, y - self.h / 2 - 31)))
+
+    @staticmethod
+    def _health_color(ratio):
+        if ratio > 0.60:
+            return S.hx("#46f08a")
+        if ratio > 0.30:
+            return S.hx("#ffd23f")
+        return S.hx("#ff4d6d")
+
 
 
 class Jet(Enemy):
@@ -812,8 +917,7 @@ class Jet(Enemy):
     def update(self, dt):
         g = self.game
         self.t += dt
-        if self.flash > 0:
-            self.flash -= dt
+        self._update_hit_state(dt)
         if self.state == "wait":
             self.wait_t -= dt
             if self.wait_t <= 0:
